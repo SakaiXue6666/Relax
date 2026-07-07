@@ -260,6 +260,11 @@ async def generate(
         "return_logprob": not evaluation,
     }
 
+    # Block 5: LoRA 训练时让 rollout 用刚热推上去的 adapter(Block 3 推送的同名 adapter)。
+    # Relax 在训练前必定先同步一次权重(=首次推 adapter),故首轮 rollout 时 adapter 已就绪。
+    if getattr(args, "lora_enable", False):
+        payload["lora_path"] = getattr(args, "lora_name", None) or "policy"
+
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True
 

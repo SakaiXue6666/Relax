@@ -474,6 +474,50 @@ class SGLangEngine(RayActor):
             payload,
         )
 
+    def load_lora_adapter_from_tensors(
+        self,
+        lora_name: str,
+        serialized_tensors: str,
+        config_dict: dict,
+        load_format: str | None = None,
+        pinned: bool = False,
+    ):
+        """Push a LoRA adapter to the rollout engine from in-memory tensors
+        (the RL weight-sync path -- no disk round-trip).
+
+        ``serialized_tensors`` must already be serialized by the caller, e.g.
+        via ``MultiprocessingSerializer.serialize`` of a ``FlattenedTensorBucket``
+        dict (with ``load_format="flattened_bucket"``). ``config_dict`` is the
+        PEFT-style adapter config (``r``, ``lora_alpha``, ``target_modules`` ...).
+        """
+        payload = {
+            "lora_name": lora_name,
+            "serialized_tensors": serialized_tensors,
+            "config_dict": config_dict,
+            "pinned": pinned,
+        }
+        if load_format is not None:
+            payload["load_format"] = load_format
+        return self._make_request(
+            "load_lora_adapter_from_tensors",
+            payload,
+        )
+
+    def load_lora_adapter(self, lora_name: str, lora_path: str, pinned: bool = False):
+        """Load a LoRA adapter from a filesystem path (adapter_config.json +
+        adapter_model.safetensors), without relaunching the engine."""
+        return self._make_request(
+            "load_lora_adapter",
+            {"lora_name": lora_name, "lora_path": lora_path, "pinned": pinned},
+        )
+
+    def unload_lora_adapter(self, lora_name: str):
+        """Unload a previously loaded LoRA adapter by name."""
+        return self._make_request(
+            "unload_lora_adapter",
+            {"lora_name": lora_name},
+        )
+
     def flush_cache(self):
         """Flush the cache of the server."""
         if self.node_rank != 0:
@@ -917,6 +961,12 @@ def _compute_server_args(
         "random_seed": args.seed + rank,
         # memory
         "enable_memory_saver": args.offload_rollout,
+        # LoRA colocate: only adapter weights are synced after training, so
+        # base model weights must survive the pause/resume cycle via CPU backup.
+        # Without this, resume_memory_occupation restores garbage for base weights.
+        "enable_weights_cpu_backup": (
+            args.offload_rollout and getattr(args, "lora_enable", False)
+        ),
         # distributed
         "host": host,
         "port": port,

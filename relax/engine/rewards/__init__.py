@@ -10,6 +10,7 @@ from relax.utils.logging_utils import get_logger
 from relax.utils.misc import load_function
 from relax.utils.types import Sample
 
+from .bleu import get_bleu_reward
 from .dapo_genrm import async_compute_score_genrm
 from .deepscaler import get_deepscaler_rule_based_reward
 from .f1 import f1_score
@@ -75,6 +76,8 @@ class RewardWorker:
             return 1 if grade_answer_verl(response, label) else 0
         elif rm_type == "f1":
             return f1_score(response, label)[0]
+        elif rm_type == "bleu":
+            return get_bleu_reward(response, label, metadata=metadata)
         elif rm_type == "gpqa":
             return compute_gpqa_reward(response, label, metadata=metadata)
         elif rm_type == "ifbench":
@@ -156,6 +159,7 @@ class RewardExecutor:
             "dapo",
             "math",
             "f1",
+            "bleu",
             "gpqa",
             "ifbench",
             "random",

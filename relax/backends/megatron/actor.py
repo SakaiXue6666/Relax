@@ -58,6 +58,7 @@ from .initialize import init, is_megatron_main_rank
 from .loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
 from .model import forward_only, initialize_model_and_optimizer, save, train
 from .weight_update.common import named_params_and_buffers
+from .weight_update.update_lora_from_tensor import UpdateLoRAFromTensor
 from .weight_update.update_weight_from_distributed import UpdateWeightFromDistributed
 from .weight_update.update_weight_from_tensor import UpdateWeightFromTensor
 
@@ -179,16 +180,47 @@ class MegatronTrainRayActor(TrainRayActor):
                 if args.update_weights_interval == 1:
                     self.weights_backuper.backup("rollout_actor")
 
-            update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
-            self.weight_updater = update_weight_cls(
-                self.args,
-                self.model,
-                weights_getter=lambda: self.weights_backuper.get("actor"),
-                model_name=type(self.hf_config).__name__.lower()
-                if self.args.model_name is None
-                else self.args.model_name,
-                quantization_config=getattr(self.hf_config, "quantization_config", None),
-            )
+            if getattr(self.args, "lora_enable", False):
+                # LoRA: 只热推 adapter 权重(基座冻结),目前仅支持 colocate(IPC)。
+                if not self.args.colocate:
+                    raise NotImplementedError("LoRA 热更新目前仅支持 colocate 部署(--colocate)。")
+                self.weight_updater = UpdateLoRAFromTensor(
+                    self.args,
+                    self.model,
+                    # LoRA 走 direct 路径,getter 返回只含 .adapter. 的参数,两点都要满足:
+                    #  - convert_to_global_name=True(坑 15):用全局命名,与 HfWeightIteratorDirect
+                    #    的 name_filter 所建 param_info 命名一致(bridge 模式下 weights_backuper
+                    #    用 vanilla 名会 KeyError);
+                    #  - translate_gpu_to_cpu=True(坑 16):colocate 下 update_weights 时训练模型
+                    #    已被 torch_memory_saver offload,live GPU 显存已释放,直接 all_gather
+                    #    其 .data 会读野指针 → CUDA illegal memory access;改取 offload 时存下的
+                    #    CPU backup(未 offload 时 get_cpu_backup 返回 None → 退回 live 张量,均安全)。
+                    weights_getter=lambda: {
+                        name: param
+                        for name, param in named_params_and_buffers(
+                            self.args,
+                            self.model,
+                            convert_to_global_name=True,
+                            translate_gpu_to_cpu=True,
+                        )
+                        if ".adapter." in name
+                    },
+                    model_name=type(self.hf_config).__name__.lower()
+                    if self.args.model_name is None
+                    else self.args.model_name,
+                    quantization_config=None,
+                )
+            else:
+                update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
+                self.weight_updater = update_weight_cls(
+                    self.args,
+                    self.model,
+                    weights_getter=lambda: self.weights_backuper.get("actor"),
+                    model_name=type(self.hf_config).__name__.lower()
+                    if self.args.model_name is None
+                    else self.args.model_name,
+                    quantization_config=getattr(self.hf_config, "quantization_config", None),
+                )
         else:
             is_pp_src_rank = (
                 mpu.get_data_parallel_rank(with_context_parallel=True) == 0
@@ -844,7 +876,8 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.update_weights()
             print_memory("after update_weights")
 
-            if self.args.ci_test and len(rollout_engines) > 0:
+            if self.args.ci_test and len(rollout_engines) > 0 and not getattr(self.args, "lora_enable", False):
+                # LoRA 只热推 adapter,不改基座 weight_version,跳过该一致性校验。
                 engine = random.choice(rollout_engines)
                 engine_version = ray.get(engine.get_weight_version.remote())
                 if str(engine_version) != str(self.weight_updater.weight_version):

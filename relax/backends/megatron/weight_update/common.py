@@ -96,8 +96,10 @@ def all_gather_param(args, name: str, param: torch.nn.Parameter) -> torch.Tensor
             full_weights.append(torch.cat(gathered, dim=0))
         return torch.cat(full_weights, dim=0)
 
-    param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
-    dist.all_gather(param_partitions, param.data, group=tp_group)
+    # 坑 16:见 all_gather_params_async —— 非连续视图会让 NCCL all_gather 崩。
+    param_data = param.data.contiguous()
+    param_partitions = [torch.empty_like(param_data) for _ in range(tp_size)]
+    dist.all_gather(param_partitions, param_data, group=tp_group)
     partition_dim = param.partition_dim
     assert param.partition_stride == 1, "partition_stride != 1 is not supported"
     # TODO: here we did an extra copy during concat, maybe merge this with convert_to_hf is better?
@@ -145,8 +147,12 @@ def all_gather_params_async(
                 tp_size = mpu.get_tensor_model_parallel_world_size()
                 tp_group = mpu.get_tensor_model_parallel_group()
 
-            param_partitions = [torch.empty_like(param.data) for _ in range(tp_size)]
-            handle = dist.all_gather(param_partitions, param.data, group=tp_group, async_op=True)
+            # 坑 16:LoRA 下 adapter 是分布式优化器连续 buffer 的「非连续视图」,
+            # 而 torch.empty_like 默认保留 stride → 源/目标都非连续 → NCCL all_gather
+            # 触发 CUDA illegal memory access。这里强制连续(base 已连续→no-op)。
+            param_data = param.data.contiguous()
+            param_partitions = [torch.empty_like(param_data) for _ in range(tp_size)]
+            handle = dist.all_gather(param_partitions, param_data, group=tp_group, async_op=True)
             gather_tasks.append((info, None, handle, param_partitions, param.partition_dim))
             handles.append(handle)
 

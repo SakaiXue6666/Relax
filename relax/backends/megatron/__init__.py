@@ -27,8 +27,8 @@ except ImportError:
 def patch_rotary_embedding(cls):
     _original_forward = cls.forward
 
-    def _patched_forward(self, *args, packed_seq_params=None, **kwargs):
-        return _original_forward(self, *args, **kwargs)
+    def _patched_forward(self, *args, **kwargs):
+        return _original_forward(self, *args)
 
     cls.forward = _patched_forward
 

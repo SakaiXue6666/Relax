@@ -18,9 +18,14 @@ from .hf_weight_iterator_base import HfWeightIteratorBase
 
 
 class HfWeightIteratorDirect(HfWeightIteratorBase):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, name_filter=None, **kwargs):
+        # ``name_filter`` (可选): 形如 ``Callable[[str], bool]``,只保留返回 True 的
+        # 全局参数名。LoRA 同步用它把范围缩到 adapter 权重,避免 gather/转换整座基座。
         super().__init__(*args, **kwargs)
-        self.megatron_local_param_info_buckets = _get_megatron_local_param_info_buckets(self.args, self.model)
+        self.name_filter = name_filter
+        self.megatron_local_param_info_buckets = _get_megatron_local_param_info_buckets(
+            self.args, self.model, name_filter=name_filter
+        )
 
     def get_hf_weight_chunks(self, megatron_local_weights):
         rank = dist.get_rank()
@@ -56,9 +61,11 @@ def _get_megatron_full_params(
         if dist.get_rank() == info.src_rank:
             params.append(
                 torch.nn.Parameter(
-                    megatron_local_weights[info.name].to(
-                        device=device_utils.make_current_torch_device(), non_blocking=True
-                    ),
+                    megatron_local_weights[info.name]
+                    .to(device=device_utils.make_current_torch_device(), non_blocking=True)
+                    # 坑 16:LoRA adapter 是分布式优化器连续 buffer 的非连续视图,
+                    # broadcast/all_gather 前强制连续(全量 base 已连续→no-op)。
+                    .contiguous(),
                     requires_grad=False,
                 )
             )
@@ -108,10 +115,12 @@ def _get_megatron_full_params(
     return gathered_params
 
 
-def _get_megatron_local_param_info_buckets(args: Namespace, model: Sequence[torch.nn.Module]) -> list[list[ParamInfo]]:
+def _get_megatron_local_param_info_buckets(
+    args: Namespace, model: Sequence[torch.nn.Module], name_filter=None
+) -> list[list[ParamInfo]]:
     """Partition params into buckets ≤ update_weight_buffer_size (with TP
     replication)."""
-    param_infos = _get_megatron_local_param_infos(args, model)
+    param_infos = _get_megatron_local_param_infos(args, model, name_filter=name_filter)
     param_info_buckets = [[]]  # Start with one empty bucket
     buffer_size = 0  # Track current bucket size in bytes
 
@@ -137,11 +146,16 @@ def _get_megatron_local_param_info_buckets(args: Namespace, model: Sequence[torc
     return param_info_buckets
 
 
-def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Module]) -> list[ParamInfo]:
+def _get_megatron_local_param_infos(
+    args: Namespace, model: Sequence[torch.nn.Module], name_filter=None
+) -> list[ParamInfo]:
     """Build global param metadata: collect → exchange PP/EP → resolve
     duplicates (MTP virtual PP) by min src_rank → validate.
 
     Returns sorted ParamInfo identical across all ranks.
+
+    ``name_filter`` (可选): 只保留满足谓词的全局参数名(基于名字的确定性过滤,
+    各 rank 一致),用于把同步范围缩到 LoRA adapter 权重。
     """
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     ep_size = mpu.get_expert_model_parallel_world_size()
@@ -149,6 +163,8 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
     param_infos = {}
     rank = dist.get_rank()
     for name, param in named_params_and_buffers(args, model):
+        if name_filter is not None and not name_filter(name):
+            continue
         param_infos[name] = ParamInfo(
             name=name,
             dtype=param.dtype,
@@ -211,5 +227,13 @@ def _get_megatron_local_param_infos(args: Namespace, model: Sequence[torch.nn.Mo
             assert infos[i].dtype == param_info.dtype, (
                 f"Parameter dtype mismatch: {infos[i].dtype} != {param_info.dtype}"
             )
+            # 坑 16:attrs(tensor_model_parallel/partition_dim)若各 rank 不一致,会让
+            # all_gather_params_async 里部分 rank 进 gather 分支、部分跳过 → 集合通信错配 →
+            # CUDA illegal memory access(且 NCCL watchdog 异步报,极难定位)。这里提前断言。
+            for _k in ("tensor_model_parallel", "partition_dim", "parallel_mode"):
+                assert infos[i].attrs.get(_k) == param_info.attrs.get(_k), (
+                    f"Parameter attr '{_k}' mismatch for {param_info.name}: "
+                    f"{infos[i].attrs.get(_k)} != {param_info.attrs.get(_k)}"
+                )
 
     return param_infos

@@ -33,6 +33,19 @@ def convert_qwen3omni_to_hf(args, name, param):
     if match:
         layer_idx, rest = match.groups()
 
+        # LoRA adapter 权重(Megatron-Bridge PEFT: ParallelLinearAdapter)
+        # 命名形如 self_attention.linear_qkv.adapter.linear_in/out.weight
+        # 转成 sglang 期望的 base_model.model.thinker.model.layers.N.self_attn.* 命名。
+        if ".adapter." in rest:
+            return _convert_qwen3omni_lora_adapter(
+                args=args,
+                layer_idx=layer_idx,
+                rest=rest,
+                param=param,
+                head_dim=head_dim,
+                value_num_per_group=value_num_per_group,
+            )
+
         # experts
         expert_pattern = r"mlp.experts\.(.+)\.weight(\d+)"
         match = re.match(expert_pattern, rest)
@@ -125,3 +138,52 @@ def convert_qwen3omni_to_hf(args, name, param):
             return [(f"thinker.model.layers.{layer_idx}.self_attn.k_norm.weight", param)]
 
     raise ValueError(f"Unknown parameter name: {name}")
+
+
+# sglang 从 PEFT 风格的 adapter 名读取 LoRA,统一带 base_model.model. 前缀。
+_LORA_PREFIX = "base_model.model.thinker.model.layers"
+
+
+def _reorder_qkv_lora_b(param, num_query_groups, value_num_per_group, head_dim):
+    """linear_qkv 的 lora_B(linear_out)输出维按 Megatron 的「分组交错」排布,
+    需重排成 sglang qkv_proj 期望的 [q; k; v] 拼接顺序(与 base 权重转换一致)。
+
+    入参 param 形状 [qkv_out, r],其中
+    qkv_out = num_query_groups * (value_num_per_group + 2) * head_dim。
+    """
+    rank = param.shape[1]
+    param = param.view(num_query_groups, value_num_per_group + 2, head_dim, rank)
+    q_param, k_param, v_param = torch.split(
+        param, split_size_or_sections=[value_num_per_group, 1, 1], dim=1
+    )
+    q_param = q_param.reshape(-1, rank)
+    k_param = k_param.reshape(-1, rank)
+    v_param = v_param.reshape(-1, rank)
+    return torch.cat([q_param, k_param, v_param], dim=0)
+
+
+def _convert_qwen3omni_lora_adapter(*, args, layer_idx, rest, param, head_dim, value_num_per_group):
+    """把 Megatron-Bridge 的 ParallelLinearAdapter 权重转成 sglang LoRA 命名。
+
+    映射约定(只支持 thinker 注意力的 qkv / o_proj):
+      - linear_qkv.adapter.linear_in  -> qkv_proj.lora_A  (形状 [r, hidden],sglang 内部自动 repeat 3 份)
+      - linear_qkv.adapter.linear_out -> qkv_proj.lora_B  (形状 [qkv_out, r],需重排成 [q;k;v])
+      - linear_proj.adapter.linear_in -> o_proj.lora_A
+      - linear_proj.adapter.linear_out-> o_proj.lora_B
+    """
+    prefix = f"{_LORA_PREFIX}.{layer_idx}.self_attn"
+
+    if rest == "self_attention.linear_qkv.adapter.linear_in.weight":
+        return [(f"{prefix}.qkv_proj.lora_A.weight", param)]
+    if rest == "self_attention.linear_qkv.adapter.linear_out.weight":
+        param = _reorder_qkv_lora_b(param, args.num_query_groups, value_num_per_group, head_dim)
+        return [(f"{prefix}.qkv_proj.lora_B.weight", param)]
+    if rest == "self_attention.linear_proj.adapter.linear_in.weight":
+        return [(f"{prefix}.o_proj.lora_A.weight", param)]
+    if rest == "self_attention.linear_proj.adapter.linear_out.weight":
+        return [(f"{prefix}.o_proj.lora_B.weight", param)]
+
+    raise ValueError(
+        f"不支持的 LoRA adapter 参数: layer={layer_idx} rest={rest}. "
+        "当前 Block 3 仅支持 thinker 注意力的 linear_qkv / linear_proj。"
+    )

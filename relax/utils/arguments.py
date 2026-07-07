@@ -319,6 +319,51 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
 
+            # ---- LoRA (PEFT) training, via Megatron-Bridge peft ----
+            parser.add_argument(
+                "--lora-enable",
+                action="store_true",
+                default=False,
+                help="启用 Megatron-Bridge 的 LoRA，对 thinker 的注意力做参数高效微调。",
+            )
+            parser.add_argument(
+                "--lora-rank",
+                type=int,
+                default=32,
+                help="LoRA 低秩维度（Megatron-Bridge LoRA 的 dim）。",
+            )
+            parser.add_argument(
+                "--lora-alpha",
+                type=float,
+                default=32.0,
+                help="LoRA 缩放系数 alpha。",
+            )
+            parser.add_argument(
+                "--lora-dropout",
+                type=float,
+                default=0.0,
+                help="LoRA dropout。",
+            )
+            parser.add_argument(
+                "--lora-target-modules",
+                type=str,
+                nargs="*",
+                default=["*language_model*linear_qkv", "*language_model*linear_proj"],
+                help=(
+                    "LoRA 目标模块（Megatron 命名）。默认用通配符限定到 thinker 的 language_model，"
+                    "避免误挂到 audio/vision 塔。如需扩到 MLP 可加 *language_model*linear_fc1/2。"
+                ),
+            )
+            parser.add_argument(
+                "--lora-name",
+                type=str,
+                default="policy",
+                help=(
+                    "热推到 sglang 的 adapter 名（Block 3 推送 + Block 5 rollout 引用同一个名字）。"
+                    "rollout 的 generate 请求会带 lora_path=该名字。"
+                ),
+            )
+
             return parser
 
         # rollout
