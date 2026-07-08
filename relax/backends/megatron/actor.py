@@ -191,17 +191,20 @@ class MegatronTrainRayActor(TrainRayActor):
                     #  - convert_to_global_name=True(坑 15):用全局命名,与 HfWeightIteratorDirect
                     #    的 name_filter 所建 param_info 命名一致(bridge 模式下 weights_backuper
                     #    用 vanilla 名会 KeyError);
-                    #  - translate_gpu_to_cpu=True(坑 16):colocate 下 update_weights 时训练模型
+                    #  - translate_gpu_to_cpu(坑 16):colocate+offload 下 update_weights 时训练模型
                     #    已被 torch_memory_saver offload,live GPU 显存已释放,直接 all_gather
                     #    其 .data 会读野指针 → CUDA illegal memory access;改取 offload 时存下的
-                    #    CPU backup(未 offload 时 get_cpu_backup 返回 None → 退回 live 张量,均安全)。
+                    #    CPU backup。但 get_cpu_backup 依赖 torch_memory_saver 已被 LD_PRELOAD 预载,
+                    #    而 LD_PRELOAD 仅在 offload_train=True 时设置(见 actor_group.py)。因此 2a
+                    #    不 offload 时必须置 False:GPU 张量本就常驻,直接读 live 张量安全,且避免
+                    #    torch_memory_saver 因 LD_PRELOAD 为空而断言失败。
                     weights_getter=lambda: {
                         name: param
                         for name, param in named_params_and_buffers(
                             self.args,
                             self.model,
                             convert_to_global_name=True,
-                            translate_gpu_to_cpu=True,
+                            translate_gpu_to_cpu=self.args.offload_train,
                         )
                         if ".adapter." in name
                     },
