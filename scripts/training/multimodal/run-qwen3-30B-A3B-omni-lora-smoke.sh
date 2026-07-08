@@ -53,6 +53,10 @@ if [ -n "${SAVE_DIR:-}" ]; then
       --load "${SAVE_DIR}"
       --save-interval "${SAVE_INTERVAL:-5}"
       --max-actor-ckpt-to-keep "${MAX_CKPT_KEEP:-1}"
+      # 续训时若改了总步数（如 40→100），checkpoint 里 LR 调度器的
+      # total-iters 与新配置不符会触发 Megatron 断言。此 flag 让调度器
+      # 用命令行新值覆盖 checkpoint 值；lr-decay-style=constant 下对 LR 无影响。
+      --override-opt_param-scheduler
    )
 fi
 
