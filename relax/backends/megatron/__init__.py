@@ -51,4 +51,43 @@ try:
 except ImportError:
     pass
 
+
+def patch_qwen3_omni_rope_index_device():
+    """修 redai bridge get_rope_index 的「多段音频 device mismatch」bug。
+
+    该函数把 M-RoPE 位置 id 全程在 CPU 上用 torch.arange(...) 构建、最后再 .to(device)。
+    作者在 video 分支已显式 `second_per_grids[i].cpu()` 保持 CPU，却漏了 audio_seqlens
+    （model.py 里 = feature_attention_mask.sum(1)，是 CUDA 张量）。当一条序列含 >=2 段音频时，
+    第 1 段处理后计数器 st 被 audio_len(CUDA) 污染，第 2 段那轮 `st_idx += text_len(CUDA)`
+    触发 'cuda and cpu' 崩溃。单轮/单段音频只跑一轮不暴露（单轮 s2tt 因此一直没事）。
+
+    修法：包一层，调用前把 audio_seqlens / *_grid_thw / second_per_grids 统一 .cpu()，
+    与作者对 video 的处理一致；结果 position_ids 仍在 input_ids.device，数值完全不变。
+    幂等：重复调用不会二次包裹。
+    """
+    import torch
+
+    from megatron.bridge.models.qwen_omni.modelling_qwen3_omni import model as _omni_model
+
+    if getattr(_omni_model.get_rope_index, "_relax_device_patched", False):
+        return
+
+    _orig_get_rope_index = _omni_model.get_rope_index
+
+    def _patched_get_rope_index(*args, **kwargs):
+        for _k in ("audio_seqlens", "image_grid_thw", "video_grid_thw", "second_per_grids"):
+            _v = kwargs.get(_k)
+            if isinstance(_v, torch.Tensor):
+                kwargs[_k] = _v.cpu()
+        return _orig_get_rope_index(*args, **kwargs)
+
+    _patched_get_rope_index._relax_device_patched = True
+    _omni_model.get_rope_index = _patched_get_rope_index
+
+
+try:
+    patch_qwen3_omni_rope_index_device()
+except ImportError:
+    pass
+
 logging.getLogger("megatron").setLevel(logging.WARNING)

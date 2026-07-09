@@ -1,0 +1,4 @@
+# 同传自定义 rollout 的额外参数（--custom-config-path 加载，键会 setattr 到 args）。
+# 实际轮数 = ceil(音频时长 / simul_chunk_ms)；max_turns 只是安全上限。
+max_turns: 64
+simul_chunk_ms: 960
