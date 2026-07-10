@@ -30,10 +30,23 @@ adapter），只是把「调一次」变成「循环调 N 次并逐块注入音�
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import numpy as np
 import torch
+
+
+# sglang 每轮返回的 text 会带结束符（如 <|im_end|>）等特殊 token。拼进 sample.response 会污染
+# BLEU：既凭空多出参考里没有的 token 拉低 precision，更会把「跨块」的 2/3/4-gram 打断（每两块
+# 之间插一个 marker），让高阶 n-gram 几乎全废。实测每样本平均 ~9.5 个 marker，BLEU 被压到真实
+# 值的 ~40%（7.2 vs 17.9）。故拼接 response 前先去掉所有 <|...|> 特殊 token。
+_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+
+def _clean_gen_text(text: str) -> str:
+    """去掉模型生成文本里的 <|...|> 特殊 token（喂 BLEU 的干净译文用）。"""
+    return _SPECIAL_TOKEN_RE.sub("", text or "")
 
 from examples.simul_s2tt.audio_chunk_env import build_env
 from relax.engine.rollout.sglang_rollout import GenerateState
@@ -294,7 +307,9 @@ async def generate(args: Any, sample: Sample, sampling_params) -> Sample:
         )
         # 模型生成的 token 参与训练（loss_mask=1），两条流一致。
         _append_generated(sample, response_tokens, new_tokens, new_logprobs)
-        response_text_parts.append(_text)
+        # 去掉结束符等特殊 token 再收集：拼进 sample.response 的必须是干净译文，否则 BLEU 被
+        # marker 打断跨块 n-gram、并凭空多出参考没有的 token（实测拉低 ~60%）。
+        response_text_parts.append(_clean_gen_text(_text))
         generated_count += len(new_tokens)
 
         if finish_type == "abort":
