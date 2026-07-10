@@ -111,7 +111,9 @@ OPTIMIZER_ARGS=(
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 4
-   --sglang-mem-fraction-static 0.7
+   # 2a(不 offload)：Megatron base 常驻，需给它腾显存，故调低 sglang 静态占比。
+   # 可由 SGLANG_MEM_FRACTION 覆盖以便调参；默认 0.55（与 noffload 脚本一致）。
+   --sglang-mem-fraction-static ${SGLANG_MEM_FRACTION:-0.55}
    --sglang-enable-lora
    --sglang-max-lora-rank 16
    --sglang-max-loras-per-batch 1
@@ -154,6 +156,8 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address=${RAY_ADDRESS:-"http://127.0.
    --max-staleness 0 \
    --num-data-storage-units 1 \
    --colocate \
+   --no-offload-train \
+   --no-offload-rollout \
    --use-health-check \
    "${MODEL_ARGS[@]}" \
    "${CKPT_ARGS[@]}" \
