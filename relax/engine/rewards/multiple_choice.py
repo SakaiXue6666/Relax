@@ -10,7 +10,9 @@ def extract_answer(text: str) -> str:
     # 有 <answer> 标签就取标签内容；没有则退回裸串 strip()
     # （label 常是裸字母如 "C"，response 才带标签——和 openr1mm 的契约一致）
     m = ANS_TAG.search(text)
+    # 🚨 ===== [YULIN-MOD] START =====
     return m.group(1).strip() if m else text.strip()
+    # 🚨 ===== [YULIN-MOD] END =====
 
 
 def get_multiple_choice_reward(response, label):

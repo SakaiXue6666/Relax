@@ -96,8 +96,28 @@ def all_gather_param(args, name: str, param: torch.nn.Parameter) -> torch.Tensor
             full_weights.append(torch.cat(gathered, dim=0))
         return torch.cat(full_weights, dim=0)
 
+    # 🚨 ===== [YULIN-MOD] START: 保证 TP all-gather 的输入张量连续 =====
+
+    # 可以把 LoRA 参数想象成一本书的三页，但三页分散在不同抽屉里：
+    # 显存大 buffer：
+    # [A0][A1][B0][C0][B1][C1][B2][D0]
+    #         ↑       ↑       ↑
+    #         LoRA 参数 B 的三个元素
+
+    # PyTorch 手里有一张索引表，所以知道：
+    # B = [B0, B1, B2]
+    
+    # 但 NCCL 更擅长搬运连续存放的数据：
+    # [B0][B1][B2]
+
     # 坑 16:见 all_gather_params_async —— 非连续视图会让 NCCL all_gather 崩。
+
+    # LoRA adapter 可能是分布式优化器大 buffer 的非连续视图。
+    # NCCL 集合通信不能安全处理这种 stride 布局，因此先复制成连续张量。
     param_data = param.data.contiguous()
+
+    # 🚨 ===== [YULIN-MOD] END =====
+
     param_partitions = [torch.empty_like(param_data) for _ in range(tp_size)]
     dist.all_gather(param_partitions, param_data, group=tp_group)
     partition_dim = param.partition_dim
@@ -147,12 +167,24 @@ def all_gather_params_async(
                 tp_size = mpu.get_tensor_model_parallel_world_size()
                 tp_group = mpu.get_tensor_model_parallel_group()
 
+            # 🚨 ===== [YULIN-MOD] START: 修复异步 NCCL all-gather 的非连续 adapter 崩溃 =====
+            
             # 坑 16:LoRA 下 adapter 是分布式优化器连续 buffer 的「非连续视图」,
             # 而 torch.empty_like 默认保留 stride → 源/目标都非连续 → NCCL all_gather
             # 触发 CUDA illegal memory access。这里强制连续(base 已连续→no-op)。
+            
+            # 将输入 adapter 变成标准连续内存。
+            # 对普通、已连续的 base 权重，这一步基本是 no-op。
             param_data = param.data.contiguous()
+            # torch.empty_like 会继承 param_data 的布局。
+            # 由于 param_data 已连续，所有目标 buffer 也会连续。
             param_partitions = [torch.empty_like(param_data) for _ in range(tp_size)]
+            # 发起异步 TP all-gather。
+            # 返回的 handle 会在后续统一等待。
             handle = dist.all_gather(param_partitions, param_data, group=tp_group, async_op=True)
+            
+            # 🚨 ===== [YULIN-MOD] END =====
+            
             gather_tasks.append((info, None, handle, param_partitions, param.partition_dim))
             handles.append(handle)
 

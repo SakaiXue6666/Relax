@@ -85,7 +85,14 @@ def _hf_validate_args(args, hf_config):
         ("num_hidden_layers", "num_layers", equal),
         ("intermediate_size", "ffn_hidden_size", equal),
         ("tie_word_embeddings", "untie_embeddings_and_output_weights", lambda x, y: not x == y),
+        
+        # 🚨 ===== [YULIN-MOD] START: 正确映射 HF 与 Megatron 的 RMSNorm epsilon 字段 =====
+
+        # Hugging Face config 字段 & Megatron 参数字段
         ("rms_norm_eps", "layernorm_epsilon", equal),
+
+        # 🚨 ===== [YULIN-MOD] END =====
+
         ("rope_theta", "rotary_base", equal),
     ]:
         if hasattr(hf_config, hf_config_name):

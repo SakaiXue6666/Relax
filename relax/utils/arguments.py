@@ -319,41 +319,51 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
 
-            # ---- LoRA (PEFT) training, via Megatron-Bridge peft ----
+            # 🚨 ===== [YULIN-MOD] START: 暴露 LoRA 训练和热推所需的命令行参数 =====
+            
+            # 总开关：是否启用 Megatron-Bridge LoRA。
             parser.add_argument(
                 "--lora-enable",
                 action="store_true",
                 default=False,
                 help="启用 Megatron-Bridge 的 LoRA，对 thinker 的注意力做参数高效微调。",
             )
+            # LoRA 低秩维度 r。
             parser.add_argument(
                 "--lora-rank",
                 type=int,
                 default=32,
                 help="LoRA 低秩维度（Megatron-Bridge LoRA 的 dim）。",
             )
+            # LoRA 缩放系数 alpha。
             parser.add_argument(
                 "--lora-alpha",
                 type=float,
                 default=32.0,
                 help="LoRA 缩放系数 alpha。",
             )
+            # adapter 分支 dropout。
             parser.add_argument(
                 "--lora-dropout",
                 type=float,
                 default=0.0,
                 help="LoRA dropout。",
             )
+            # 指定哪些 Megatron 模块挂 LoRA。
             parser.add_argument(
                 "--lora-target-modules",
                 type=str,
                 nargs="*",
+                # 默认只匹配 Thinker language_model 的注意力投影。
+                # linear_qkv 是融合的 Q/K/V 投影；
+                # linear_proj 对应注意力输出投影。
                 default=["*language_model*linear_qkv", "*language_model*linear_proj"],
                 help=(
                     "LoRA 目标模块（Megatron 命名）。默认用通配符限定到 thinker 的 language_model，"
                     "避免误挂到 audio/vision 塔。如需扩到 MLP 可加 *language_model*linear_fc1/2。"
                 ),
             )
+            # adapter 在 SGLang 中注册的逻辑名称。
             parser.add_argument(
                 "--lora-name",
                 type=str,
@@ -363,6 +373,8 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "rollout 的 generate 请求会带 lora_path=该名字。"
                 ),
             )
+
+            # 🚨 ===== [YULIN-MOD] END =====
 
             return parser
 

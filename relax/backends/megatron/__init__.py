@@ -27,8 +27,16 @@ except ImportError:
 def patch_rotary_embedding(cls):
     _original_forward = cls.forward
 
+    # 🚨 ===== [YULIN-MOD] START: 忽略不兼容的 rotary embedding 关键字参数 =====
+
     def _patched_forward(self, *args, **kwargs):
+        # 保留位置参数，但不把 kwargs 转发给旧版原始 forward。
+        #
+        # 用于兼容调用方和当前 Megatron rotary embedding 实现之间的签名差异：
+        # 调用方可能传入新版才支持的关键字参数，而旧版 forward 不认识。
         return _original_forward(self, *args)
+
+    # 🚨 ===== [YULIN-MOD] END =====
 
     cls.forward = _patched_forward
 
@@ -52,6 +60,8 @@ except ImportError:
     pass
 
 
+# 🚨 ===== [YULIN-MOD] START: 修复 Qwen3-Omni 多段音频位置索引的设备不一致 =====
+
 def patch_qwen3_omni_rope_index_device():
     """修 redai bridge get_rope_index 的「多段音频 device mismatch」bug。
 
@@ -69,25 +79,40 @@ def patch_qwen3_omni_rope_index_device():
 
     from megatron.bridge.models.qwen_omni.modelling_qwen3_omni import model as _omni_model
 
+    # 幂等检查：如果已经打过补丁，直接返回。
+    # 防止模块被重复 import 时套上多层 wrapper。
     if getattr(_omni_model.get_rope_index, "_relax_device_patched", False):
         return
 
+    # 保存 Bridge 原始实现。
     _orig_get_rope_index = _omni_model.get_rope_index
 
     def _patched_get_rope_index(*args, **kwargs):
+        # get_rope_index 内部使用 CPU torch.arange 等操作构造位置索引。
+        # 这些长度/网格参数如果留在 CUDA，会在多段累计过程中污染 CPU 计数器。
         for _k in ("audio_seqlens", "image_grid_thw", "video_grid_thw", "second_per_grids"):
             _v = kwargs.get(_k)
             if isinstance(_v, torch.Tensor):
+                # 统一放到 CPU，仅改变计算设备，不改变长度或网格数值。
                 kwargs[_k] = _v.cpu()
+        # 调用 Bridge 原始实现。
+        # 原实现最后仍会按 input_ids.device 返回 position_ids。
         return _orig_get_rope_index(*args, **kwargs)
 
+    # 给 wrapper 打标记，供上面的幂等检查识别。
     _patched_get_rope_index._relax_device_patched = True
+    # 用 wrapper 替换模块级函数。
     _omni_model.get_rope_index = _patched_get_rope_index
 
 
 try:
+    # import Relax Megatron backend 时自动应用补丁。
     patch_qwen3_omni_rope_index_device()
 except ImportError:
+    # 如果当前 Bridge 版本没有 Qwen3-Omni 模块，
+    # 不影响其他模型继续使用 Relax。
     pass
+
+# 🚨 ===== [YULIN-MOD] END =====
 
 logging.getLogger("megatron").setLevel(logging.WARNING)

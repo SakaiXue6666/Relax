@@ -114,19 +114,32 @@ def setup_model_and_optimizer(
     assert not args.moe_use_upcycling
     assert args.load is not None or args.pretrained_checkpoint is not None
 
+    # 🚨 ===== [YULIN-MOD] START: 将 LoRA provider 接入 Megatron 模型构建主流程 =====
+
+    # 先取得原始模型构造函数。
     base_provider = get_model_provider_func(args, role)
     if getattr(args, "lora_enable", False):
-        # LoRA 模式：PEFT 自身负责“冻结全部基座 + 仅 adapter 可训”，
-        # 因此走 LoRA wrapper 而不是通用 freeze wrapper。
+        # LoRA 模式下，使用 LoRA wrapper。
+        #
+        # Megatron-Bridge PEFT 会负责：
+        # - 冻结全部基座；
+        # - 插入 adapter；
+        # - 只让 adapter 保持可训练。
         provider = wrap_model_provider_with_lora(base_provider, args)
     else:
+        # 非 LoRA 模式维持 Relax 原有逻辑，
+        # 按 only_train_params_name_list / freeze_params_name_list 冻结参数。
         provider = wrap_model_provider_with_freeze(base_provider, args)
 
+    # 将选好的 provider 交给 Megatron。
+    # actor/critic 会在这里进一步被 DDP 包装。
     model = get_model(
         provider,
         ModelType.encoder_or_decoder,
         wrap_with_ddp=role in ["actor", "critic"],
     )
+
+    # 🚨 ===== [YULIN-MOD] END =====
 
     # Some model providers (e.g., Qwen3VLGPTModel) rebuild the decoder in __init__,
     # which causes duplicate RoutingReplay registrations. Rebuild the list from

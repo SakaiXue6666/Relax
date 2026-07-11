@@ -1,4 +1,4 @@
-# Copyright (c) 2026 Relax Authors. All Rights Reserved.
+ # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 import logging
 import os
@@ -180,6 +180,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 if args.update_weights_interval == 1:
                     self.weights_backuper.backup("rollout_actor")
 
+            # 🚨 ===== [YULIN-MOD] START: LoRA 模式只同步 adapter，而不是整个基座模型 =====
+            
             if getattr(self.args, "lora_enable", False):
                 # LoRA: 只热推 adapter 权重(基座冻结),目前仅支持 colocate(IPC)。
                 if not self.args.colocate:
@@ -198,22 +200,39 @@ class MegatronTrainRayActor(TrainRayActor):
                     #    而 LD_PRELOAD 仅在 offload_train=True 时设置(见 actor_group.py)。因此 2a
                     #    不 offload 时必须置 False:GPU 张量本就常驻,直接读 live 张量安全,且避免
                     #    torch_memory_saver 因 LD_PRELOAD 为空而断言失败。
+                    
+                    # 动态取得当前最新的 adapter 权重。
                     weights_getter=lambda: {
                         name: param
                         for name, param in named_params_and_buffers(
                             self.args,
                             self.model,
+                            # direct iterator 的参数元数据使用全局 Megatron 参数名。
+                            # getter 也必须返回相同命名体系，否则查找时会出现 KeyError。
                             convert_to_global_name=True,
+                            # 开启训练 offload 时，模型 live GPU 存储已经被释放，
+                            # 必须读取 offload 阶段保存的 CPU backup。
+                            #
+                            # 未开启训练 offload 时，参数常驻 GPU，直接读取 live Tensor；
+                            # 此时不应依赖 torch_memory_saver 的 CPU backup。
                             translate_gpu_to_cpu=self.args.offload_train,
                         )
+
+                        # 只保留 Megatron-Bridge PEFT adapter 参数。
+                        # 基座权重完全不进入 LoRA 同步路径。
                         if ".adapter." in name
                     },
+                    # 传入模型类型，用于后面的 Megatron → HF 权重转换。
                     model_name=type(self.hf_config).__name__.lower()
                     if self.args.model_name is None
                     else self.args.model_name,
+                    # LoRA adapter 不做量化。
                     quantization_config=None,
                 )
             else:
+                # 非 LoRA 模式维持原来的全量权重同步：
+                # colocate 使用 tensor/IPC 更新器；
+                # 独立 rollout 部署使用分布式更新器。
                 update_weight_cls = UpdateWeightFromTensor if self.args.colocate else UpdateWeightFromDistributed
                 self.weight_updater = update_weight_cls(
                     self.args,
@@ -224,6 +243,9 @@ class MegatronTrainRayActor(TrainRayActor):
                     else self.args.model_name,
                     quantization_config=getattr(self.hf_config, "quantization_config", None),
                 )
+
+            # 🚨 ===== [YULIN-MOD] END =====
+
         else:
             is_pp_src_rank = (
                 mpu.get_data_parallel_rank(with_context_parallel=True) == 0
@@ -879,8 +901,16 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater.update_weights()
             print_memory("after update_weights")
 
+            # 🚨 ===== [YULIN-MOD] START: LoRA CI 测试不比较基座 weight_version =====
+
             if self.args.ci_test and len(rollout_engines) > 0 and not getattr(self.args, "lora_enable", False):
-                # LoRA 只热推 adapter,不改基座 weight_version,跳过该一致性校验。
+                # LoRA 只卸载/加载 adapter，不调用基座的 update_weights 接口，
+                # 因此不会更新 rollout engine 的基座 weight_version。
+                #
+                # 如果仍执行下面的检查，会把正常的 LoRA 更新误判为版本不一致。
+            
+            # 🚨 ===== [YULIN-MOD] END =====
+
                 engine = random.choice(rollout_engines)
                 engine_version = ray.get(engine.get_weight_version.remote())
                 if str(engine_version) != str(self.weight_updater.weight_version):

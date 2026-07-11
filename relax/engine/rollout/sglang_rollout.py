@@ -260,10 +260,24 @@ async def generate(
         "return_logprob": not evaluation,
     }
 
+    # 🚨 ===== [YULIN-MOD] START: 让普通 rollout 请求使用最新 LoRA adapter =====
+
+    # 到了 sglang_rollout.py 这里，LoRA 可能已经被 SGLang 成功加载了，但还有一个关键问题：
+    # - “生成的时候，SGLang 怎么知道要用这个 LoRA，而不是只用原始 base model？”
+    # 
+    # 所以这像是在每次 rollout 生成请求上贴一张小纸条：
+    # - 这次生成请使用名叫 policy 的 LoRA adapter
+    #
+    # 如果没有这张纸条，SGLang 可能已经收到了 LoRA，但生成时仍然按纯 base model 来跑。
+    # 它解决的是“生成请求到底有没有点名使用 LoRA”的问题。
+
     # Block 5: LoRA 训练时让 rollout 用刚热推上去的 adapter(Block 3 推送的同名 adapter)。
     # Relax 在训练前必定先同步一次权重(=首次推 adapter),故首轮 rollout 时 adapter 已就绪。
     if getattr(args, "lora_enable", False):
+        # 该名称必须与 UpdateLoRAFromTensor 注册 adapter 时使用的名称相同。
         payload["lora_path"] = getattr(args, "lora_name", None) or "policy"
+    
+    # 🚨 ===== [YULIN-MOD] END =====
 
     if args.use_rollout_routing_replay:
         payload["return_routed_experts"] = True

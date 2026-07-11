@@ -474,6 +474,24 @@ class SGLangEngine(RayActor):
             payload,
         )
 
+    # 🚨 ===== [YULIN-MOD] START: 向 Relax 暴露 SGLang LoRA 加载和卸载接口 =====
+
+    # 前面几层已经把 LoRA 训练出来、收集起来、转换成 SGLang 能懂的格式了。到了 sglang_engine.py 这里，问题主要变成：
+    # - “Relax 怎么把 LoRA 交给 SGLang？”
+    # - “Relax 怎么让 SGLang 加载、卸载这个 LoRA？”
+    # - “如果 rollout offload 把显存里的 base 权重暂时挪走，SGLang 醒来时怎么恢复 base？”
+    # 
+    # 所以这像是在 Relax 和 SGLang 之间加了一组“控制接口”：
+    # - 把 LoRA 从内存交给 SGLang
+    # - 把 LoRA 从磁盘交给 SGLang
+    # - 让 SGLang 卸载某个 LoRA
+    # - 让 SGLang 在 offload 时保留 base 权重的 CPU 备份
+    # 
+    # 它解决的是“LoRA 怎么送进去、怎么管理、base 怎么别丢”的问题。
+
+    # “内存加载 LoRA”。
+    # 可以想成 Relax 刚训练完 LoRA，手里有一包新鲜出炉的 adapter 张量。
+    # 它不想先落盘成文件，再让 SGLang 从硬盘读，太绕了。
     def load_lora_adapter_from_tensors(
         self,
         lora_name: str,
@@ -490,6 +508,8 @@ class SGLangEngine(RayActor):
         dict (with ``load_format="flattened_bucket"``). ``config_dict`` is the
         PEFT-style adapter config (``r``, ``lora_alpha``, ``target_modules`` ...).
         """
+        # 从内存中的序列化张量加载 adapter，
+        # 用于 RL 训练后的实时权重同步，不需要写磁盘。
         payload = {
             "lora_name": lora_name,
             "serialized_tensors": serialized_tensors,
@@ -498,25 +518,35 @@ class SGLangEngine(RayActor):
         }
         if load_format is not None:
             payload["load_format"] = load_format
+        # 然后发给 SGLang
         return self._make_request(
             "load_lora_adapter_from_tensors",
             payload,
         )
 
+    # “磁盘加载 LoRA”。
+    # 它适合传统方式：LoRA 已经存在某个目录里。
     def load_lora_adapter(self, lora_name: str, lora_path: str, pinned: bool = False):
         """Load a LoRA adapter from a filesystem path (adapter_config.json +
         adapter_model.safetensors), without relaunching the engine."""
+        # 从 adapter_config.json 和 adapter_model.safetensors
+        # 所在的磁盘目录加载 adapter。
         return self._make_request(
             "load_lora_adapter",
             {"lora_name": lora_name, "lora_path": lora_path, "pinned": pinned},
         )
 
+    # “卸载 LoRA”。
+    # SGLang 可能已经注册了一个叫 policy 的 adapter。如果之后要换新的、清理旧的
     def unload_lora_adapter(self, lora_name: str):
         """Unload a previously loaded LoRA adapter by name."""
+        # 按逻辑名称卸载已经注册的 adapter。
         return self._make_request(
             "unload_lora_adapter",
             {"lora_name": lora_name},
         )
+
+    # 🚨 ===== [YULIN-MOD] END =====
 
     def flush_cache(self):
         """Flush the cache of the server."""
@@ -961,12 +991,21 @@ def _compute_server_args(
         "random_seed": args.seed + rank,
         # memory
         "enable_memory_saver": args.offload_rollout,
+
+        # 🚨 ===== [YULIN-MOD] START: LoRA rollout offload 时由 SGLang 自行备份基座 =====
+        
+        # 如果开启 rollout offload，并且当前是 LoRA 模式，
+        # 那就让 SGLang 自己保存 base 权重的 CPU 备份。
+
         # LoRA colocate: only adapter weights are synced after training, so
         # base model weights must survive the pause/resume cycle via CPU backup.
         # Without this, resume_memory_occupation restores garbage for base weights.
         "enable_weights_cpu_backup": (
             args.offload_rollout and getattr(args, "lora_enable", False)
         ),
+
+        # 🚨 ===== [YULIN-MOD] END =====
+
         # distributed
         "host": host,
         "port": port,

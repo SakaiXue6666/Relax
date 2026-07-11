@@ -22,10 +22,19 @@ class HfWeightIteratorDirect(HfWeightIteratorBase):
         # ``name_filter`` (可选): 形如 ``Callable[[str], bool]``,只保留返回 True 的
         # 全局参数名。LoRA 同步用它把范围缩到 adapter 权重,避免 gather/转换整座基座。
         super().__init__(*args, **kwargs)
+
+        # 🚨 ===== [YULIN-MOD] START: 让 direct iterator 只建立 LoRA 参数桶 =====
+        
+        # 保存过滤函数，便于记录当前 iterator 的同步范围。
         self.name_filter = name_filter
+        # 构造参数桶时立刻过滤。
+        # LoRA 场景只会为 .adapter. 参数创建 ParamInfo，
+        # 基座权重不会进入后续 gather/转换阶段。
         self.megatron_local_param_info_buckets = _get_megatron_local_param_info_buckets(
             self.args, self.model, name_filter=name_filter
         )
+
+        # 🚨 ===== [YULIN-MOD] END =====
 
     def get_hf_weight_chunks(self, megatron_local_weights):
         rank = dist.get_rank()
@@ -63,9 +72,17 @@ def _get_megatron_full_params(
                 torch.nn.Parameter(
                     megatron_local_weights[info.name]
                     .to(device=device_utils.make_current_torch_device(), non_blocking=True)
+                    
+                    # 🚨 ===== [YULIN-MOD] START: 在 PP/EP/TP 通信前连续化 LoRA 张量 =====
+                    
                     # 坑 16:LoRA adapter 是分布式优化器连续 buffer 的非连续视图,
                     # broadcast/all_gather 前强制连续(全量 base 已连续→no-op)。
+
+                    # adapter 可能是优化器 buffer 的非连续视图。
+                    # 在 broadcast/all-gather 前强制转换成连续布局。
                     .contiguous(),
+
+                    # 🚨 ===== [YULIN-MOD] END =====
                     requires_grad=False,
                 )
             )
@@ -120,7 +137,13 @@ def _get_megatron_local_param_info_buckets(
 ) -> list[list[ParamInfo]]:
     """Partition params into buckets ≤ update_weight_buffer_size (with TP
     replication)."""
+
+    # 🚨 ===== [YULIN-MOD] START: 参数分桶沿用相同的 name_filter =====
+
     param_infos = _get_megatron_local_param_infos(args, model, name_filter=name_filter)
+    
+    # 🚨 ===== [YULIN-MOD] END =====
+
     param_info_buckets = [[]]  # Start with one empty bucket
     buffer_size = 0  # Track current bucket size in bytes
 
@@ -163,8 +186,14 @@ def _get_megatron_local_param_infos(
     param_infos = {}
     rank = dist.get_rank()
     for name, param in named_params_and_buffers(args, model):
+
+        # 🚨 ===== [YULIN-MOD] START: 跳过所有非目标参数 =====
+
         if name_filter is not None and not name_filter(name):
             continue
+
+        # 🚨 ===== [YULIN-MOD] END =====
+
         param_infos[name] = ParamInfo(
             name=name,
             dtype=param.dtype,
@@ -227,13 +256,19 @@ def _get_megatron_local_param_infos(
             assert infos[i].dtype == param_info.dtype, (
                 f"Parameter dtype mismatch: {infos[i].dtype} != {param_info.dtype}"
             )
+
+            # 🚨 ===== [YULIN-MOD] START: 提前发现跨 rank 集合通信条件不一致 =====
+
             # 坑 16:attrs(tensor_model_parallel/partition_dim)若各 rank 不一致,会让
             # all_gather_params_async 里部分 rank 进 gather 分支、部分跳过 → 集合通信错配 →
             # CUDA illegal memory access(且 NCCL watchdog 异步报,极难定位)。这里提前断言。
+            
             for _k in ("tensor_model_parallel", "partition_dim", "parallel_mode"):
                 assert infos[i].attrs.get(_k) == param_info.attrs.get(_k), (
                     f"Parameter attr '{_k}' mismatch for {param_info.name}: "
                     f"{infos[i].attrs.get(_k)} != {param_info.attrs.get(_k)}"
                 )
+
+            # 🚨 ===== [YULIN-MOD] END =====
 
     return param_infos

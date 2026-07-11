@@ -76,8 +76,14 @@ class RewardWorker:
             return 1 if grade_answer_verl(response, label) else 0
         elif rm_type == "f1":
             return f1_score(response, label)[0]
+
+        # 🚨 ===== [YULIN-MOD] START: 执行 BLEU reward =====
+
         elif rm_type == "bleu":
             return get_bleu_reward(response, label, metadata=metadata)
+        
+        # 🚨 ===== [YULIN-MOD] END =====
+        
         elif rm_type == "gpqa":
             return compute_gpqa_reward(response, label, metadata=metadata)
         elif rm_type == "ifbench":
@@ -159,7 +165,13 @@ class RewardExecutor:
             "dapo",
             "math",
             "f1",
+
+            # 🚨 ===== [YULIN-MOD] START: （加入合法类型白名单）允许命令行选择 bleu 奖励 =====
+
             "bleu",
+
+            # 🚨 ===== [YULIN-MOD] END =====
+
             "gpqa",
             "ifbench",
             "random",

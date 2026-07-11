@@ -1,5 +1,7 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+# 🚨 ===== [YULIN-MOD] START: 为翻译任务提供平滑的句级 BLEU 奖励 =====
+
 """自包含的句级 BLEU 奖励（翻译任务）。
 
 - 返回 [0, 1] 的连续分数：天然有方差，避免 0/1 二值奖励的「全对/全错」零方差。
@@ -88,6 +90,7 @@ def sentence_bleu(hyp: list[str], ref: list[str], max_n: int = 4) -> float:
     return bp * geo_mean
 
 
+# 奖励入口
 def get_bleu_reward(response, label, metadata=None) -> float:
     """句级 BLEU 奖励 ∈ [0,1]。
 
@@ -113,3 +116,5 @@ def get_bleu_reward(response, label, metadata=None) -> float:
                 pass
 
     return float(sentence_bleu(_tokenize(hyp_str), _tokenize(ref_str)))
+
+# 🚨 ===== [YULIN-MOD] END =====

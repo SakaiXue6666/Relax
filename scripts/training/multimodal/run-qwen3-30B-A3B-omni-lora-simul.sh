@@ -1,7 +1,9 @@
 #!/bin/bash
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
-#
+
+# 🚨 ===== [YULIN-MOD] START: 启动 LoRA + GRPO + 多轮同传 rollout =====
+
 # Qwen3-Omni-30B-A3B thinker-LoRA 同传（simultaneous S2TT）多轮 rollout 脚本。
 #
 # 与 run-...-omni-lora-smoke.sh 的唯一区别：挂上自定义多轮 generate + 其配置。
@@ -111,7 +113,7 @@ OPTIMIZER_ARGS=(
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 4
-   # 2a(不 offload)：Megatron base 常驻，需给它腾显存，故调低 sglang 静态占比。
+     # 2a(不 offload)：Megatron base 常驻，需给它腾显存，故调低 sglang 静态占比。
    # 可由 SGLANG_MEM_FRACTION 覆盖以便调参；默认 0.55（与 noffload 脚本一致）。
    --sglang-mem-fraction-static ${SGLANG_MEM_FRACTION:-0.55}
    --sglang-enable-lora
@@ -121,7 +123,7 @@ SGLANG_ARGS=(
    --sglang-attention-backend triton
    --sglang-disable-cuda-graph
    --sglang-disable-custom-all-reduce
-)
+) 
 
 PERF_ARGS=(
    --train-backend megatron
@@ -170,3 +172,5 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address=${RAY_ADDRESS:-"http://127.0.
    "${PERF_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${MISC_ARGS[@]}"  2>&1 | tee log/qwen3-omni-lora-simul-${now}.log
+
+# 🚨 ===== [YULIN-MOD] END =====
