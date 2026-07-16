@@ -1,3 +1,4 @@
+# 🚨 ===== [YULIN-MOD] START =====
 """本地自测：只验证纯 Python 的切块 env 逻辑（不依赖 GPU/relax 重栈）。
 
 跑法（在 Relax 根目录）：
@@ -110,3 +111,4 @@ if __name__ == "__main__":
     test_env_loop()
     test_last_chunk_not_dropped()
     print("\nALL ENV SELFTESTS PASSED")
+# 🚨 ===== [YULIN-MOD] END =====

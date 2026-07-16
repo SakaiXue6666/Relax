@@ -1,3 +1,4 @@
+# 🚨 ===== [YULIN-MOD] START =====
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 """定长同传环境：把整段音频切成固定时长 chunk，每轮吐一个。
@@ -100,3 +101,4 @@ class AudioChunkEnv(BaseInteractionEnv):
 def build_env(sample: Any, args: Any) -> AudioChunkEnv:
     """rollout.py 通过 ``--rollout-interaction-env-path`` 找到这个工厂函数。"""
     return AudioChunkEnv(sample=sample, args=args)
+# 🚨 ===== [YULIN-MOD] END =====

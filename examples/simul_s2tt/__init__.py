@@ -1,3 +1,4 @@
+# 🚨 ===== [YULIN-MOD] START =====
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 """同传（simultaneous speech-to-text translation）多轮 rollout 示例。
@@ -11,3 +12,4 @@
 - 与 deepeyes 的差异：环境是「脚本化」的（每轮直接吐下一个 chunk，不依赖模型动作），
   且观测是音频而非图像。
 """
+# 🚨 ===== [YULIN-MOD] END =====
