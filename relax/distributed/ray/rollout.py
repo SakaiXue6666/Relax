@@ -5,6 +5,7 @@
 import asyncio
 import dataclasses
 import enum
+import importlib
 import logging
 import multiprocessing
 import os
@@ -53,6 +54,26 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = get_logger(__name__)
+
+
+def _resolve_rollout_engine_class(args: Any) -> type:
+    """Resolve the engine proxy declared by the rollout function's module."""
+    rollout_function_path = getattr(args, "rollout_function_path", "") or ""
+    module_path, separator, _ = rollout_function_path.rpartition(".")
+    if not separator:
+        return SGLangEngine
+    module = importlib.import_module(module_path)
+    engine_class_path = getattr(module, "ROLLOUT_ENGINE_CLASS", None)
+    if engine_class_path is None:
+        return SGLangEngine
+    if not isinstance(engine_class_path, str) or "." not in engine_class_path:
+        raise ValueError(
+            f"{module_path}.ROLLOUT_ENGINE_CLASS must be a fully qualified class path"
+        )
+    engine_class = load_function(engine_class_path)
+    if not isinstance(engine_class, type):
+        raise TypeError(f"{engine_class_path} does not resolve to a class")
+    return engine_class
 
 
 @dataclasses.dataclass
@@ -435,7 +456,7 @@ class EngineGroup:
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
 
-        RolloutRayActor = ray.remote(SGLangEngine)
+        RolloutRayActor = ray.remote(_resolve_rollout_engine_class(self.args))
 
         rollout_engines = []
         for i in range(len(self.all_engines)):
@@ -1217,6 +1238,12 @@ class RolloutManager(ReloadableMixin):
         Returns:
             Dict with request_id and initial status (or NOOP if idempotent no-op)
         """
+        engine_class = _resolve_rollout_engine_class(self.args)
+        if not getattr(engine_class, "supports_elastic_scale", True):
+            raise ValueError(
+                f"{engine_class.__name__} does not support elastic rollout scale-out"
+            )
+
         # Auto-detect mode: if num_replicas > 0, use ray_native; otherwise use external
         if num_replicas > 0:
             scale_mode = ScaleOutMode.RAY_NATIVE
@@ -1738,7 +1765,7 @@ class RolloutManager(ReloadableMixin):
                 # Create SGLangEngine actor (connecting mode).
                 # No GPU needed: this actor is an RPC proxy to the external engine;
                 # NCCL weight sync is orchestrated via HTTP to the remote SGLang process.
-                RolloutRayActor = ray.remote(SGLangEngine)
+                RolloutRayActor = ray.remote(_resolve_rollout_engine_class(self.args))
                 engine = RolloutRayActor.options(
                     num_cpus=0.2,
                     num_gpus=0.2,
