@@ -25,6 +25,43 @@ from relax.utils.http_utils import post
 from relax.utils.types import Sample
 
 
+_OMNI_SAMPLING_PARAM_KEYS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+    "stop",
+    "stop_token_ids",
+    "seed",
+    "max_new_tokens",
+    "max_tokens",
+}
+
+
+def _sanitize_sampling_params(
+    sampling_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Translate Relax sampling params to SGLang-Omni's strict protocol."""
+    sanitized = {
+        key: value
+        for key, value in sampling_params.items()
+        if key in _OMNI_SAMPLING_PARAM_KEYS
+    }
+    if "sampling_seed" in sampling_params:
+        sanitized["seed"] = sampling_params["sampling_seed"]
+    return sanitized
+
+
+def _reject_unsupported_media_markers(text: str) -> None:
+    markers = [marker for marker in ("<image>", "<video>") if marker in text]
+    if markers:
+        raise NotImplementedError(
+            "The initial SGLang-Omni S2TT rollout supports audio and text only; "
+            f"found unsupported marker(s): {', '.join(markers)}"
+        )
+
+
 def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
     if not isinstance(messages, list):
         raise ValueError(
@@ -38,6 +75,7 @@ def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
         message = dict(original_message)
         content = message.get("content", "")
         if isinstance(content, str):
+            _reject_unsupported_media_markers(content)
             sanitized.append(message)
             continue
         if not isinstance(content, list):
@@ -51,7 +89,9 @@ def _sanitize_messages(messages: Any) -> list[dict[str, Any]]:
                 audio_markers += 1
                 parts.append({"type": "audio"})
             elif part_type == "text":
-                parts.append({"type": "text", "text": str(part.get("text") or "")})
+                text = str(part.get("text") or "")
+                _reject_unsupported_media_markers(text)
+                parts.append({"type": "text", "text": text})
             elif part_type in {"image", "video"}:
                 raise NotImplementedError(
                     "The initial SGLang-Omni S2TT rollout supports audio and text only"
@@ -74,6 +114,23 @@ def _as_omni_audio_data_url(encoded_audio: str) -> str:
     return encoded_audio
 
 
+def _ensure_omni_chat_template(
+    tokenizer: Any,
+    processor: Any,
+    apply_kwargs: dict[str, Any],
+) -> None:
+    """Expose the processor-owned Qwen3-Omni template to the tokenizer."""
+    if getattr(tokenizer, "chat_template", None) or apply_kwargs.get("chat_template"):
+        return
+    processor_template = getattr(processor, "chat_template", None)
+    if not processor_template:
+        raise ValueError(
+            "Qwen3-Omni chat template is missing from both tokenizer and processor; "
+            "provide it through --apply-chat-template-kwargs"
+        )
+    tokenizer.chat_template = processor_template
+
+
 def _encode_initial_inputs(
     sample: Sample,
     messages: list[dict[str, Any]],
@@ -88,6 +145,7 @@ def _encode_initial_inputs(
             f"SGLang-Omni S2TT expects one initial audio chunk, got {len(audios)}"
         )
     apply_kwargs = getattr(args, "apply_chat_template_kwargs", None) or {}
+    _ensure_omni_chat_template(tokenizer, processor, apply_kwargs)
     prompt_text = tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -122,7 +180,7 @@ async def _run_inference_step(
 ) -> tuple[str, list[int], list[float], str]:
     payload: dict[str, Any] = {
         "messages": messages,
-        "sampling_params": sampling_params,
+        "sampling_params": _sanitize_sampling_params(sampling_params),
         "metadata": {
             "audios": [_as_omni_audio_data_url(audio) for audio in encoded_audios]
         },
@@ -277,4 +335,12 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -
         sample.status = Sample.Status.COMPLETED
     sample.metadata["simul_stop_reason"] = stop_reason
     sample.metadata["simul_num_chunks"] = env.num_chunks
+    if len(sample.loss_mask) != sample.response_length:
+        raise RuntimeError("SGLang-Omni loss mask and response lengths do not match")
+    if len(sample.rollout_log_probs) != sample.response_length:
+        raise RuntimeError(
+            "SGLang-Omni rollout logprob and response lengths do not match"
+        )
+    if len(sample.tokens) != len(expanded_ids) + sample.response_length:
+        raise RuntimeError("SGLang-Omni training token alignment is inconsistent")
     return sample

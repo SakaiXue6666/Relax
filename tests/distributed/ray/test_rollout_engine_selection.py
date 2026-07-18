@@ -6,7 +6,11 @@ import pytest
 
 from relax.backends.sglang.sglang_engine import SGLangEngine
 from relax.backends.sglang_omni.omni_engine import SGLangOmniEngine
-from relax.distributed.ray.rollout import _resolve_rollout_engine_class
+from relax.distributed.ray.rollout import (
+    _resolve_rollout_abort_function,
+    _resolve_rollout_engine_class,
+)
+from relax.engine.rollout import sglang_omni_rollout
 
 
 def test_standard_rollout_keeps_standard_sglang_engine() -> None:
@@ -15,6 +19,7 @@ def test_standard_rollout_keeps_standard_sglang_engine() -> None:
     )
 
     assert _resolve_rollout_engine_class(args) is SGLangEngine
+    assert _resolve_rollout_abort_function(args) is None
 
 
 def test_omni_rollout_selects_independent_omni_engine() -> None:
@@ -25,6 +30,10 @@ def test_omni_rollout_selects_independent_omni_engine() -> None:
     )
 
     assert _resolve_rollout_engine_class(args) is SGLangOmniEngine
+    assert (
+        _resolve_rollout_abort_function(args)
+        is sglang_omni_rollout.abort_rollout
+    )
 
 
 def test_invalid_engine_marker_fails_clearly(monkeypatch) -> None:

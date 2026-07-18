@@ -8,6 +8,7 @@ import pytest
 
 from examples.simul_s2tt import omni_rollout
 from examples.simul_s2tt.rollout import _run_inference_step as standard_inference_step
+from relax.engine.rollout import sglang_rollout
 from relax.utils.types import Sample
 
 
@@ -22,6 +23,107 @@ def test_omni_audio_data_url_adapts_legacy_relax_encoding() -> None:
         omni_rollout._as_omni_audio_data_url(f"data:audio/wav;base64,{payload}")
         == f"data:audio/wav;base64,{payload}"
     )
+
+
+def test_omni_initial_encoding_uses_processor_owned_chat_template(monkeypatch) -> None:
+    class FakeTokenizer:
+        chat_template = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            assert messages == [
+                {"role": "user", "content": [{"type": "audio"}]}
+            ]
+            assert self.chat_template == "official-omni-template"
+            assert kwargs == {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            return "rendered prompt"
+
+        def encode(self, text, *, add_special_tokens):
+            assert text == "rendered prompt"
+            assert add_special_tokens is False
+            return [1, 2]
+
+    tokenizer = FakeTokenizer()
+    processor = SimpleNamespace(chat_template="official-omni-template")
+    monkeypatch.setattr(
+        omni_rollout,
+        "_run_processor",
+        lambda *args: ([3, 4, 5], {"input_features": "features"}),
+    )
+    monkeypatch.setattr(
+        omni_rollout,
+        "encode_audio_for_rollout_engine",
+        lambda audio, sample_rate: f"audio:{audio[0]}:{sample_rate}",
+    )
+    sample = Sample(
+        prompt=[],
+        multimodal_inputs={"audio": [np.asarray([0.25], dtype=np.float32)]},
+    )
+
+    result = omni_rollout._encode_initial_inputs(
+        sample,
+        [{"role": "user", "content": [{"type": "audio"}]}],
+        processor,
+        tokenizer,
+        SimpleNamespace(
+            apply_chat_template_kwargs=None,
+            audio_sample_rate=16000,
+        ),
+    )
+
+    assert tokenizer.chat_template == "official-omni-template"
+    assert result == (
+        [1, 2],
+        [3, 4, 5],
+        ["audio:0.25:16000"],
+        {"input_features": "features"},
+    )
+
+
+@pytest.mark.parametrize("marker", ["<image>", "<video>"])
+def test_omni_messages_reject_unsupported_media_markers(marker) -> None:
+    with pytest.raises(NotImplementedError, match="supports audio and text only"):
+        omni_rollout._sanitize_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": marker},
+                        {"type": "audio"},
+                    ],
+                }
+            ]
+        )
+
+
+def test_omni_abort_uses_pause_then_continue(monkeypatch) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    async def fake_post(url, payload):
+        calls.append((url, payload))
+        return {"success": True}
+
+    monkeypatch.setattr(
+        "relax.engine.rollout.sglang_omni_rollout.post",
+        fake_post,
+    )
+    from relax.engine.rollout.sglang_omni_rollout import abort_rollout
+
+    asyncio.run(
+        abort_rollout(
+            SimpleNamespace(
+                sglang_router_ip="omni",
+                sglang_router_port=30000,
+            )
+        )
+    )
+
+    assert calls == [
+        ("http://omni:30000/pause_generation", {"mode": "abort"}),
+        ("http://omni:30000/continue_generation", {}),
+    ]
 
 
 def test_omni_inference_payload_uses_messages_audio_metadata_and_thinker_lora(
@@ -67,6 +169,52 @@ def test_omni_inference_payload_uses_messages_audio_metadata_and_thinker_lora(
     ]
 
 
+def test_omni_inference_translates_real_relax_sampling_params(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    async def fake_post(url, payload):
+        captured.append(payload)
+        return {
+            "text": "hello",
+            "meta_info": {
+                "output_token_logprobs": [[-0.1, 7]],
+                "finish_reason": {"type": "stop"},
+            },
+        }
+
+    monkeypatch.setattr(omni_rollout, "post", fake_post)
+    asyncio.run(
+        omni_rollout._run_inference_step(
+            "http://omni/generate",
+            [{"role": "user", "content": [{"type": "audio"}]}],
+            {
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "max_new_tokens": 8,
+                "stop": None,
+                "stop_token_ids": None,
+                "skip_special_tokens": False,
+                "no_stop_trim": True,
+                "spaces_between_special_tokens": False,
+                "sampling_seed": 42,
+            },
+            ["audio0"],
+            SimpleNamespace(lora_enable=False),
+        )
+    )
+
+    assert captured[0]["sampling_params"] == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "max_new_tokens": 8,
+        "stop": None,
+        "stop_token_ids": None,
+        "seed": 42,
+    }
+
+
 def test_standard_sglang_inference_payload_is_unchanged(monkeypatch) -> None:
     captured: list[dict] = []
 
@@ -100,6 +248,57 @@ def test_standard_sglang_inference_payload_is_unchanged(monkeypatch) -> None:
             "audio_data": ["audio0"],
         }
     ]
+
+
+def test_custom_omni_generate_skips_standard_group_multimodal_preencoding(
+    monkeypatch,
+) -> None:
+    encode_calls: list[dict] = []
+
+    async def fake_encode(multimodal_inputs):
+        encode_calls.append(multimodal_inputs)
+        return {"audio_data": ["unused"]}, 0.1
+
+    async def fake_generate_and_rm(args, sample, sampling_params, evaluation=False):
+        return sample
+
+    monkeypatch.setattr(
+        sglang_rollout,
+        "GenerateState",
+        lambda _: SimpleNamespace(aborted=False),
+    )
+    monkeypatch.setattr(
+        sglang_rollout,
+        "_encode_multimodal_inputs",
+        fake_encode,
+    )
+    monkeypatch.setattr(
+        sglang_rollout,
+        "generate_and_rm",
+        fake_generate_and_rm,
+    )
+    shared_multimodal_inputs = {"audio": [np.asarray([0.0], dtype=np.float32)]}
+    group = [
+        Sample(prompt=[], multimodal_inputs=shared_multimodal_inputs),
+        Sample(prompt=[], multimodal_inputs=shared_multimodal_inputs),
+    ]
+    args = SimpleNamespace(
+        custom_generate_function_path="examples.simul_s2tt.omni_rollout.generate",
+        sglang_enable_deterministic_inference=False,
+        group_rm=False,
+    )
+
+    result = asyncio.run(
+        sglang_rollout.generate_and_rm_group(
+            args,
+            group,
+            {"max_new_tokens": 8},
+        )
+    )
+
+    assert result == group
+    assert encode_calls == []
+    assert not any(hasattr(sample, "_pre_encoded_mm") for sample in group)
 
 
 def test_omni_inference_requires_output_token_logprobs(monkeypatch) -> None:

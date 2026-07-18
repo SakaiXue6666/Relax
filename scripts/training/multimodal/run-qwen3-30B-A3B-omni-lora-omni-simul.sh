@@ -55,7 +55,7 @@ ROLLOUT_ARGS=(
    --multimodal-keys '{"audio":"audio"}'
    --rollout-function-path relax.engine.rollout.sglang_omni_rollout.generate_rollout
    --custom-generate-function-path examples.simul_s2tt.omni_rollout.generate
-   --custom-config-path "${SCRIPT_DIR}/../../../examples/simul_s2tt/config.yaml"
+   --custom-config-path "${CUSTOM_CONFIG_PATH:-${SCRIPT_DIR}/../../../examples/simul_s2tt/config.yaml}"
 )
 
 if [ -n "${ROLLOUT_MAX_PROMPT_LEN:-}" ]; then
@@ -121,6 +121,13 @@ MISC_ARGS=(
    --no-rope-fusion
 )
 
+HEALTH_ARGS=(
+   --use-health-check
+)
+if [ -n "${MAX_GLOBAL_RESTART:-}" ]; then
+   HEALTH_ARGS+=(--max-global-restart "${MAX_GLOBAL_RESTART}")
+fi
+
 mkdir -p log
 ray job submit ${RAY_NO_WAIT:+--no-wait} --address="${RAY_ADDRESS:-http://127.0.0.1:8265}" \
    ${WORKING_DIR:+--working-dir "${WORKING_DIR}"} \
@@ -132,7 +139,7 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address="${RAY_ADDRESS:-http://127.0.
    --colocate \
    --no-offload-train \
    --no-offload-rollout \
-   --use-health-check \
+   "${HEALTH_ARGS[@]}" \
    "${MODEL_ARGS[@]}" \
    "${CKPT_ARGS[@]}" \
    "${ROLLOUT_ARGS[@]}" \

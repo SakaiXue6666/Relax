@@ -13,6 +13,7 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
@@ -74,6 +75,26 @@ def _resolve_rollout_engine_class(args: Any) -> type:
     if not isinstance(engine_class, type):
         raise TypeError(f"{engine_class_path} does not resolve to a class")
     return engine_class
+
+
+def _resolve_rollout_abort_function(args: Any) -> Callable | None:
+    """Resolve an optional abort hook declared by the rollout module."""
+    rollout_function_path = getattr(args, "rollout_function_path", "") or ""
+    module_path, separator, _ = rollout_function_path.rpartition(".")
+    if not separator:
+        return None
+    module = importlib.import_module(module_path)
+    abort_function_path = getattr(module, "ROLLOUT_ABORT_FUNCTION", None)
+    if abort_function_path is None:
+        return None
+    if not isinstance(abort_function_path, str) or "." not in abort_function_path:
+        raise ValueError(
+            f"{module_path}.ROLLOUT_ABORT_FUNCTION must be a fully qualified function path"
+        )
+    abort_function = load_function(abort_function_path)
+    if not callable(abort_function):
+        raise TypeError(f"{abort_function_path} does not resolve to a callable")
+    return abort_function
 
 
 @dataclasses.dataclass

@@ -18,7 +18,10 @@ import torch
 from packaging.version import parse
 from tqdm import tqdm
 
-from relax.distributed.ray.rollout import _log_rollout_data
+from relax.distributed.ray.rollout import (
+    _log_rollout_data,
+    _resolve_rollout_abort_function,
+)
 from relax.engine.filters.base_types import MetricGatherer, call_dynamic_filter
 from relax.engine.rewards import async_rm, batched_async_rm
 from relax.engine.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput
@@ -519,12 +522,23 @@ async def generate_and_rm_group(
         if sample.session_id is None:
             sample.session_id = str(uuid.uuid4())
 
-    # Group-level multimodal encoding de-duplication: when samples in the same
-    # group share the same multimodal_inputs object (e.g. after shallow-copy in
-    # data_source), encode once and attach the result to every sample so that
-    # generate() picks up the pre-encoded data instead of re-encoding per sample.
+    # Group-level multimodal encoding de-duplication is only consumed by the
+    # default generate(). Custom generators own their encoding contract and
+    # must not inherit a large, unused base64 payload on every sample.
+    uses_default_generate = all(
+        (
+            getattr(sample, "generate_function_path", None)
+            or args.custom_generate_function_path
+        )
+        is None
+        for sample in group
+    )
     first_mm = getattr(group[0], "multimodal_inputs", None)
-    if first_mm is not None and all(getattr(s, "multimodal_inputs", None) is first_mm for s in group[1:]):
+    if (
+        uses_default_generate
+        and first_mm is not None
+        and all(getattr(s, "multimodal_inputs", None) is first_mm for s in group[1:])
+    ):
         encoded_mm, t_enc = await _encode_multimodal_inputs(first_mm)
         for sample in group:
             sample._pre_encoded_mm = encoded_mm
@@ -598,19 +612,28 @@ async def abort(args: Namespace, rollout_id: int) -> tuple[list[list[Sample]], l
     # Step 2: Now abort the remaining (non-protected) pending tasks.
     state.aborted = True
 
-    if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_slime_router:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/list_workers")
-        urls = response["urls"]
+    abort_function = _resolve_rollout_abort_function(args)
+    if abort_function is not None:
+        await abort_function(args)
     else:
-        response = await get(f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers")
-        urls = [worker["url"] for worker in response["workers"]]
+        if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_slime_router:
+            response = await get(
+                f"http://{args.sglang_router_ip}:"
+                f"{args.sglang_router_port}/list_workers"
+            )
+            urls = response["urls"]
+        else:
+            response = await get(
+                f"http://{args.sglang_router_ip}:{args.sglang_router_port}/workers"
+            )
+            urls = [worker["url"] for worker in response["workers"]]
 
-    logger.info(f"Abort request for {urls}")
-    abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
-    abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
-    for url, result in zip(urls, abort_results, strict=False):
-        if isinstance(result, BaseException):
-            logger.warning(f"Failed to abort worker at {url}: {result}")
+        logger.info(f"Abort request for {urls}")
+        abort_tasks = [post(f"{url}/abort_request", {"abort_all": True}) for url in urls]
+        abort_results = await asyncio.gather(*abort_tasks, return_exceptions=True)
+        for url, result in zip(urls, abort_results, strict=False):
+            if isinstance(result, BaseException):
+                logger.warning(f"Failed to abort worker at {url}: {result}")
 
     # make sure all the pending tasks are finished
     count = 0
