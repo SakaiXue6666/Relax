@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from examples.simul_s2tt.audio_chunk_env import build_env
@@ -247,6 +248,7 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -
     mm_train_buffer = [initial_mm_train] if initial_mm_train else []
     max_response_len = getattr(args, "rollout_max_response_len", None)
     generated_count = 0
+    rollout_turns = 0
     stop_reason = "completed"
     url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
 
@@ -270,6 +272,7 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -
             encoded_audios,
             args,
         )
+        rollout_turns += 1
         _append_generated(sample, response_tokens, new_tokens, new_logprobs)
         clean_text = _clean_gen_text(text)
         response_text_parts.append(clean_text)
@@ -335,6 +338,22 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -
         sample.status = Sample.Status.COMPLETED
     sample.metadata["simul_stop_reason"] = stop_reason
     sample.metadata["simul_num_chunks"] = env.num_chunks
+    sample.metadata["rollout_turns"] = rollout_turns
+    print(
+        "[omni-simul-evidence] "
+        f"sample_index={sample.index} "
+        f"rollout_turns={rollout_turns} "
+        f"num_chunks={env.num_chunks} "
+        f"stop_reason={stop_reason} "
+        f"status={sample.status.value}",
+        flush=True,
+    )
+    print(
+        "[omni-simul-output] "
+        f"sample_index={sample.index} "
+        f"response={json.dumps(sample.response[:256], ensure_ascii=True)}",
+        flush=True,
+    )
     if len(sample.loss_mask) != sample.response_length:
         raise RuntimeError("SGLang-Omni loss mask and response lengths do not match")
     if len(sample.rollout_log_probs) != sample.response_length:
