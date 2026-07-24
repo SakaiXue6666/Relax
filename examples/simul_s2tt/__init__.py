@@ -1,4 +1,4 @@
-# 🚨 ===== [YULIN-MOD] START =====
+# 🚨 ===== [YULIN-MOD] START: 定义定长音频分块的多轮同传 rollout 示例 =====
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 """同传（simultaneous speech-to-text translation）多轮 rollout 示例。

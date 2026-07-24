@@ -1,4 +1,4 @@
-# 🚨 ===== [YULIN-MOD] START =====
+# 🚨 ===== [YULIN-MOD] START: 用纯 Python 自测音频切块和多轮环境，不依赖 GPU =====
 """本地自测：只验证纯 Python 的切块 env 逻辑（不依赖 GPU/relax 重栈）。
 
 跑法（在 Relax 根目录）：

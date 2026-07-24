@@ -1,4 +1,4 @@
-# 🚨 ===== [YULIN-MOD] START =====
+# 🚨 ===== [YULIN-MOD] START: 将整段音频切成定长 chunk，并逐轮提供给同传 rollout =====
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
 """定长同传环境：把整段音频切成固定时长 chunk，每轮吐一个。

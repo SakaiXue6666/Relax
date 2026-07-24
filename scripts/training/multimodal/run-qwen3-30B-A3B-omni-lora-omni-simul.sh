@@ -2,6 +2,58 @@
 
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+# 🚨 ===== [YULIN-MOD] START: (omni) 启动 Thinker LoRA、GRPO 和外部 SGLang-Omni 多轮同传训练 =====
+
+# 这份脚本是独立的 SGLang-Omni 训练入口，
+# 不会替换或删除 Relax 原有的标准 SGLang 同传训练脚本。
+#
+# 它验证的主要链路是：
+#
+# Megatron TP4/EP4
+# → 在 4 张 GPU 上训练 Qwen3-Omni Thinker LoRA
+# → 导出当前 LoRA tensor
+# → 通过 HTTP 热更新到外部 SGLang-Omni Thinker TP4
+# → 使用 messages + metadata.audios 执行多轮音频 rollout
+# → 取回 Thinker 文本 token 和 token logprob
+# → 使用 --rm-type 指定的 reward 计算每条 Sample 的奖励
+# → GRPO 根据 reward 更新 Thinker LoRA
+#
+# Actor 和 rollout 使用：
+#
+# --resource '{"actor": [1, 4], "rollout": [1, 4]}'
+# --colocate
+#
+# 因此 Megatron TP4 和 SGLang-Omni Thinker TP4
+# 会复用同一组 4 张 GPU，而不是各自申请 4 张卡。
+#
+# Relax 通过下面这些参数连接已经启动好的 Omni router：
+#
+# --rollout-external
+# --rollout-external-engine-addrs
+# --sglang-router-ip
+# --sglang-router-port
+#
+# Relax 这里只创建一个 SGLangOmniEngine Ray proxy，
+# 不会在 Ray actor 内重新启动一整套 Omni pipeline。
+# 外部 Omni router、Thinker、Talker 和 Code2Wav 必须由 launcher
+# 或测试脚本提前启动。
+#
+# 当前训练目标仍然是 Thinker 文本：
+#
+# - LoRA 只训练并热更新到 thinker；
+# - rollout 请求使用 output_modalities=["text"]；
+# - reward 根据 Thinker 文本输出计算；
+# - Talker 和 Code2Wav 可以用于训练后的语音生成验证，
+#   但尚未进入 reward 或反向训练链路。
+#
+# --rollout-function-path 使用 sglang_omni_rollout.generate_rollout，
+# 负责选择 SGLangOmniEngine 和 Omni abort hook。
+#
+# --custom-generate-function-path 使用 omni_rollout.generate，
+# 负责把 Relax Sample 转换成 messages、metadata.audios
+# 和 stage_params.thinker.lora_name，再把 Omni 返回的文本 token、
+# logprob 和多模态训练特征重新写回 Sample。
+
 set -ex
 set -o pipefail
 
@@ -150,3 +202,5 @@ ray job submit ${RAY_NO_WAIT:+--no-wait} --address="${RAY_ADDRESS:-http://127.0.
    "${WANDB_ARGS[@]}" \
    "${OMNI_ARGS[@]}" \
    "${MISC_ARGS[@]}" 2>&1 | tee "log/qwen3-omni-lora-omni-simul-${now}.log"
+
+# 🚨 ===== [YULIN-MOD] END =====

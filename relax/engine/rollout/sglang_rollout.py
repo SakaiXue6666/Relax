@@ -525,6 +525,42 @@ async def generate_and_rm_group(
     # Group-level multimodal encoding de-duplication is only consumed by the
     # default generate(). Custom generators own their encoding contract and
     # must not inherit a large, unused base64 payload on every sample.
+
+    # 🚨 ===== [YULIN-MOD] START: (omni) 自定义 Omni generate 跳过标准 SGLang 的多模态预编码 =====
+
+        # 标准 generate() 会读取 Sample 上的 _pre_encoded_mm。
+    #
+    # 同一个 group 中的多个 Sample 经常共享同一份多模态输入，
+    # 所以标准 SGLang 路径会：
+    #
+    # 共享的 multimodal_inputs
+    # → 提前编码一次
+    # → 把结果保存到每个 Sample 的 _pre_encoded_mm
+    # → 各个默认 generate() 直接复用
+    #
+    # 这样可以避免同一张图片或同一段音频被重复编码。
+    #
+    # 但 Omni 自定义 generate 使用的是另一套请求和训练数据契约：
+    #
+    # structured messages
+    # + metadata.audios
+    # + stage_params.thinker.lora_name
+    # + Megatron 所需的 multimodal_train_inputs
+    #
+    # Omni generate 还要按照同传轮次逐块追加音频，
+    # 因此它必须自己负责每一轮音频的编码和 token 对齐。
+    #
+    # 如果这里仍然替 Omni 做标准 SGLang 预编码：
+    #
+    # 1. 每个 Sample 都会额外携带一份没有被 Omni 使用的 base64 payload；
+    # 2. 标准 SGLang 的预编码结果会和 Omni messages 契约同时存在；
+    # 3. 多轮音频 chunk 可能被重复编码；
+    # 4. 展开的训练 token、音频特征和 loss mask 可能无法一一对齐。
+    #
+    # 所以这里先判断当前 group 是否全部使用默认 generate()。
+    # 只有默认 generate() 才继续执行 Relax 原来的共享预编码；
+    # 自定义 Omni generate 则完全跳过这里，由它自己处理音频。
+
     uses_default_generate = all(
         (
             getattr(sample, "generate_function_path", None)
@@ -536,6 +572,9 @@ async def generate_and_rm_group(
     first_mm = getattr(group[0], "multimodal_inputs", None)
     if (
         uses_default_generate
+
+        # 🚨 ===== [YULIN-MOD] END =====
+
         and first_mm is not None
         and all(getattr(s, "multimodal_inputs", None) is first_mm for s in group[1:])
     ):
@@ -612,10 +651,49 @@ async def abort(args: Namespace, rollout_id: int) -> tuple[list[list[Sample]], l
     # Step 2: Now abort the remaining (non-protected) pending tasks.
     state.aborted = True
 
+    # 🚨 ===== [YULIN-MOD] START: (omni) 优先调用 backend 自定义 abort，并保留标准 SGLang fallback =====
+
+    # 标准 SGLang 和 SGLang-Omni 的“停止生成”按钮不一样。
+    #
+    # 标准 SGLang 的终止流程是：
+    #
+    # Router /workers 或 /list_workers
+    # → 找到 router 后面的所有 SGLang worker
+    # → 对每个 worker 调用 /abort_request
+    #
+    # 但 SGLang-Omni 的一个请求可能同时跨过：
+    #
+    # Thinker
+    # → Talker
+    # → Code2Wav
+    #
+    # 因此不能只找到某个普通 SGLang worker 并调用 /abort_request。
+    # Omni 必须通过自己的控制面统一终止跨 stage 的请求。
+    #
+    # _resolve_rollout_abort_function() 会检查当前 rollout 模块是否声明了
+    # ROLLOUT_ABORT_FUNCTION：
+    #
+    # Omni rollout 声明了 hook
+    # → 调用 pause_generation(mode="abort")
+    # → 清理尚未完成的跨 stage 请求
+    # → 调用 continue_generation 恢复服务
+    #
+    # 普通 SGLang rollout 没有声明 hook
+    # → abort_function 为 None
+    # → 进入下面的 else
+    # → 完整执行 Relax 原来的 /workers + /abort_request 逻辑
+    #
+    # 因此新增 Omni abort 不会改变标准 SGLang 的终止行为。
+
+    # Omni 使用 pause_generation/continue_generation；
+    # 普通 SGLang 仍走原来的 /workers 和 /abort_request。
     abort_function = _resolve_rollout_abort_function(args)
     if abort_function is not None:
         await abort_function(args)
     else:
+
+    # 🚨 ===== [YULIN-MOD] END =====
+
         if parse(sglang_router.__version__) <= parse("0.2.1") or args.use_slime_router:
             response = await get(
                 f"http://{args.sglang_router_ip}:"

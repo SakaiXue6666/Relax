@@ -1,5 +1,35 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+# 🚨 ===== [YULIN-MOD] START: (omni) 使用 messages 和 metadata.audios 调用 Omni Thinker 执行多轮同传 =====
+
+# 这个文件可以理解成 Relax 和 SGLang-Omni 之间的“请求翻译器”。
+#
+# 原有标准 SGLang 同传路径发送的是：
+#
+# Relax Sample
+# → input_ids + audio_data
+# → POST /generate
+# → lora_path="policy"
+# → 返回文本 token 和 logprob
+#
+# SGLang-Omni 使用另一套请求契约：
+#
+# Relax Sample
+# → structured messages
+# → metadata.audios
+# → stage_params.thinker.lora_name="policy"
+# → POST /generate
+# → 从 Thinker 结果中取文本 token 和 logprob
+#
+# 所以这里不重写 Relax 的训练、reward 或 batch 调度，只负责：
+# 1. 把每轮音频 chunk 转成 Omni 能理解的 messages/metadata.audios；
+# 2. 把 LoRA 选择放到 thinker stage；
+# 3. 把 Omni 返回的文本和 logprob 重新装回 Sample；
+# 4. 继续维护 Megatron 训练所需的展开 token、loss mask 和音频特征。
+#
+# 当前 output_modalities 仍然只有 text：
+# 这里只验证 Omni Thinker rollout，还没有启用 Talker/Code2Wav 语音输出。
+
 """SGLang-Omni multi-turn S2TT rollout using structured messages."""
 
 from __future__ import annotations
@@ -363,3 +393,5 @@ async def generate(args: Any, sample: Sample, sampling_params: dict[str, Any]) -
     if len(sample.tokens) != len(expanded_ids) + sample.response_length:
         raise RuntimeError("SGLang-Omni training token alignment is inconsistent")
     return sample
+
+# 🚨 ===== [YULIN-MOD] END =====

@@ -1,5 +1,33 @@
 # Copyright (c) 2026 Relax Authors. All Rights Reserved.
 
+# 🚨 ===== [YULIN-MOD] START: (omni) 新增外部 Omni engine proxy，并保留原有 SGLang backend =====
+
+# Relax 原来的 Ray rollout 管理器认识的是 SGLangEngine。
+# 如果直接把 SGLangEngine 改成 Omni，就会破坏已经能工作的标准 SGLang 路径。
+#
+# 因此这里新增一个独立的 SGLangOmniEngine，可以把它理解成：
+#
+# Relax 期待的 SGLangEngine 插座
+#            ↓ 转接头
+# 外部 SGLang-Omni Router
+#
+# 它保持 Relax 已经熟悉的 engine 方法名，
+# 但实际请求发给已经在外部启动好的 Omni router。
+#
+# 普通 SGLang rollout：
+#   仍然使用原来的 SGLangEngine，行为不变。
+#
+# Omni rollout：
+#   只有 rollout 模块显式声明 SGLangOmniEngine 时才走这里。
+#
+# 当前 Omni engine 只支持 external 模式：
+# - 不由 Relax 启动模型；
+# - 不注册到标准 SGLang router；
+# - 不支持 Relax 的 elastic scale-out；
+# - 不支持 rollout offload 的 release/resume。
+#
+# 对暂时不支持的能力显式报错，避免表面继续运行、实际状态已经错误。
+
 from __future__ import annotations
 
 import time
@@ -121,3 +149,5 @@ class SGLangOmniEngine(SGLangEngine):
     def resume_memory_occupation(self, tags: list[str] | None = None) -> None:
         del tags
         raise NotImplementedError("SGLang-Omni rollout offload is not supported")
+
+# 🚨 ===== [YULIN-MOD] END =====

@@ -60,7 +60,7 @@ class HfWeightIteratorBridge(HfWeightIteratorBase):
             def iter_quantized_named_weights():
                 for hf_param_name, weight, megatron_param_name in named_weights:
                     
-                    # 🚨 ===== [YULIN-MOD] START =====
+                    # 🚨 ===== [YULIN-MOD] START: 移除 PEFT 包装引入的 base_layer 路径，保持 SGLang 权重命名 =====
                     
                     # PEFT 包装原层后，参数路径中可能多出 .base_layer.。
                     # SGLang 仍按原模块路径匹配，因此需要删除这一层。

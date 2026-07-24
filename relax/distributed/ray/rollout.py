@@ -56,6 +56,28 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = get_logger(__name__)
 
+# 🚨 ===== [YULIN-MOD] START: (omni) 按 rollout 模块动态选择 engine 类型和 abort hook，默认仍使用标准 SGLang =====
+
+# Relax 原来把 rollout engine 写死成 SGLangEngine。
+#
+# 现在需要同时支持两条路径：
+#
+# 普通 rollout 模块
+# → 没有声明 ROLLOUT_ENGINE_CLASS
+# → 回退到原来的 SGLangEngine
+#
+# Omni rollout 模块
+# → 声明 ROLLOUT_ENGINE_CLASS=SGLangOmniEngine
+# → 使用独立的 Omni engine proxy
+#
+# abort 也是同样的设计：
+# - 普通 SGLang 没有声明 hook，继续走原来的 /workers + /abort_request；
+# - Omni 声明自己的 hook，走 pause_generation(mode="abort")，
+#   然后调用 continue_generation 恢复服务。
+#
+# 这相当于给 rollout 模块留了两个“可选插槽”：
+# 一个决定使用哪种 engine proxy，一个决定怎么终止请求。
+# rollout 模块不声明这些插槽时，完全保持 Relax 原来的 SGLang 行为。
 
 def _resolve_rollout_engine_class(args: Any) -> type:
     """Resolve the engine proxy declared by the rollout function's module."""
@@ -95,7 +117,7 @@ def _resolve_rollout_abort_function(args: Any) -> Callable | None:
     if not callable(abort_function):
         raise TypeError(f"{abort_function_path} does not resolve to a callable")
     return abort_function
-
+# 🚨 ===== [YULIN-MOD] END =====
 
 @dataclasses.dataclass
 class EngineGroupConfig:
@@ -477,7 +499,23 @@ class EngineGroup:
 
         pg, reordered_bundle_indices, reordered_gpu_ids = self.pg
 
+        # 🚨 ===== [YULIN-MOD] START: (omni) 创建 rollout actor 时使用模块声明的 engine 类型 =====
+
+        # 前面的 resolver 只负责找出应该使用哪个 engine class。
+        # 到这里才真正通过 ray.remote 把选中的 backend 包装成 Ray actor：
+        #
+        # 普通 rollout 模块
+        # → _resolve_rollout_engine_class() 返回 SGLangEngine
+        #
+        # Omni rollout 模块
+        # → _resolve_rollout_engine_class() 返回 SGLangOmniEngine
+        #
+        # 因此这里只改变 actor 使用的具体 backend，
+        # 后面的 placement group、GPU 分配和启动流程仍然复用 Relax 原来的逻辑。
+
         RolloutRayActor = ray.remote(_resolve_rollout_engine_class(self.args))
+
+        # 🚨 ===== [YULIN-MOD] END =====
 
         rollout_engines = []
         for i in range(len(self.all_engines)):
@@ -1259,11 +1297,42 @@ class RolloutManager(ReloadableMixin):
         Returns:
             Dict with request_id and initial status (or NOOP if idempotent no-op)
         """
+        # 🚨 ===== [YULIN-MOD] START: (omni) 阻止不支持弹性扩容的 Omni engine 执行 scale-out =====
+
+        # 标准 SGLang 在 Ray-native 模式下，不只是创建一个 Ray proxy。
+        #
+        # Relax 会先为新副本申请 Placement Group 和 GPU，
+        # 然后创建新的 SGLangEngine Ray actor。
+        # SGLangEngine.init() 会继续调用 launch_server_process()，
+        # 在新分配的 GPU 上真正启动一套新的：
+        #
+        # SGLang scheduler
+        # → model runner
+        # → HTTP server
+        #
+        # 新服务启动后，Relax 还会从已有的 seed engine 同步权重，
+        # 最后把新服务注册到 router。
+        # 因此标准 SGLang 的 Ray-native scale-out 会真正增加推理容量。
+        #
+        # 当前 SGLangOmniEngine 不具备这套启动能力。
+        # 它只支持 external 模式，init() 只是连接并检查已经启动好的
+        # SGLang-Omni router，不会启动新的 Thinker、Talker 或 Code2Wav。
+        #
+        # 因此多创建一个 SGLangOmniEngine Ray actor，
+        # 只会多出一个指向同一 Omni router 的 proxy，
+        # 不会增加真正的 Omni worker，也不会增加实际推理容量。
+        #
+        # Omni 通过 supports_elastic_scale=False 显式声明不支持扩容。
+        # getattr(..., True) 则保证没有这个新字段的标准 SGLangEngine
+        # 继续执行 Relax 原来的 scale-out 流程。
+
         engine_class = _resolve_rollout_engine_class(self.args)
         if not getattr(engine_class, "supports_elastic_scale", True):
             raise ValueError(
                 f"{engine_class.__name__} does not support elastic rollout scale-out"
             )
+
+        # 🚨 ===== [YULIN-MOD] END =====
 
         # Auto-detect mode: if num_replicas > 0, use ray_native; otherwise use external
         if num_replicas > 0:
@@ -1786,7 +1855,33 @@ class RolloutManager(ReloadableMixin):
                 # Create SGLangEngine actor (connecting mode).
                 # No GPU needed: this actor is an RPC proxy to the external engine;
                 # NCCL weight sync is orchestrated via HTTP to the remote SGLang process.
+
+                # 🚨 ===== [YULIN-MOD] START: (omni) 外部 engine 重连时恢复模块声明的 engine 类型 =====
+
+                # external engine 路径也会重新创建一个 Ray proxy，
+                # 因此这里不能继续把 actor 类型写死成 SGLangEngine。
+                #
+                # 必须再次根据 rollout 模块解析 backend：
+                #
+                # 普通 rollout 模块
+                # → 创建 SGLangEngine proxy
+                #
+                # 声明了自定义 engine 的 rollout 模块
+                # → 创建对应的自定义 engine proxy
+                #
+                # 否则初始连接可能使用的是自定义 backend，
+                # 但 external engine 再次建立连接时却会悄悄退回 SGLangEngine，
+                # 导致同一组 rollout engine 前后使用不同的通信协议。
+                #
+                # 当前 Omni 已通过 supports_elastic_scale=False 禁止 scale-out，
+                # 所以正常情况下 Omni 不会进入这里；
+                # 这里仍然动态解析，是为了保证整条 external engine 路径
+                # 不再依赖写死的 SGLangEngine。
+
                 RolloutRayActor = ray.remote(_resolve_rollout_engine_class(self.args))
+
+                # 🚨 ===== [YULIN-MOD] END =====
+
                 engine = RolloutRayActor.options(
                     num_cpus=0.2,
                     num_gpus=0.2,
