@@ -440,41 +440,45 @@ class UpdateWeightFromTensor:
 
         config_dict = self._lora_sync.config_dict()
 
+        # ===== [YULIN-MOD] START: inline the adapter bytes instead of sharing memory =====
         # SGLang broadcasts this single blob to every TP worker (each slices its own shard), so the
-        # tensors must be host-shared, not CUDA-IPC handles. The default file_descriptor sharing
-        # strategy sends an fd that cannot cross the Ray -> HTTP hops to the server process; switch
-        # to file_system (self-describing /dev/shm filenames in the pickle) around the serialize.
-        from torch.multiprocessing import get_sharing_strategy, set_sharing_strategy
+        # tensors must be host-shared, not CUDA-IPC handles. Neither torch sharing strategy survives
+        # the Ray -> HTTP hops: file_descriptor sends an fd the server process cannot claim, and
+        # file_system sends a /dev/shm filename whose storage is refcounted -- the workers that map
+        # it first drop their reference on return, unlinking the file before a straggler opens it,
+        # which is why TP0 alone died with ENOENT while TP1-3 loaded fine.
+        #
+        # The adapter is ~24 MB at rank 16, small enough to inline. A plain pickle carries the bytes
+        # themselves and has no lifetime coupling at all; SGLang reads it unchanged, since
+        # MultiprocessingSerializer.deserialize just base64-decodes and unpickles.
+        import pickle
+
+        import pybase64
 
         tensors = {name: t.contiguous() for name, t in full_adapter.items()}
-        prev_strategy = get_sharing_strategy()
-        set_sharing_strategy("file_system")
-        try:
-            serialized = MultiprocessingSerializer.serialize(tensors, output_str=True)
-            t3 = monotonic()
-            if not first_sync:
-                ray.get(self._ipc_engine.unload_lora_adapter.remote(LORA_ADAPTER_NAME))
-            # Keep `tensors` alive across the synchronous load: file_system storages live only while
-            # the producer holds them, and the server maps them during this call.
-            ray.get(
-                self._ipc_engine.load_lora_adapter_from_tensors.remote(
-                    lora_name=LORA_ADAPTER_NAME,
-                    serialized_tensors=serialized,
-                    config_dict=config_dict,
-                    load_format=None,
-                    pinned=False,
-                )
+        serialized = pybase64.b64encode(pickle.dumps(tensors)).decode("utf-8")
+        t3 = monotonic()
+        if not first_sync:
+            ray.get(self._ipc_engine.unload_lora_adapter.remote(LORA_ADAPTER_NAME))
+        ray.get(
+            self._ipc_engine.load_lora_adapter_from_tensors.remote(
+                lora_name=LORA_ADAPTER_NAME,
+                serialized_tensors=serialized,
+                config_dict=config_dict,
+                load_format=None,
+                pinned=False,
             )
-            logger.info(
-                "[lora-adapter] tensor push: export=%.2fs gather=%.2fs load=%.2fs (%d tensors, rank=%d)",
-                t_export,
-                t_gather,
-                monotonic() - t3,
-                len(tensors),
-                dist.get_rank(),
-            )
-        finally:
-            set_sharing_strategy(prev_strategy)
+        )
+        logger.info(
+            "[lora-adapter] tensor push: export=%.2fs gather=%.2fs load=%.2fs (%d tensors, %.1fMB, rank=%d)",
+            t_export,
+            t_gather,
+            monotonic() - t3,
+            len(tensors),
+            len(serialized) / 1e6,
+            dist.get_rank(),
+        )
+        # ===== [YULIN-MOD] END =====
 
     def _send_hf_params(self, hf_named_tensors) -> tuple[list[ObjectRef], Any]:
         all_refs = []
