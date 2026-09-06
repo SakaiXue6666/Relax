@@ -119,6 +119,20 @@ def get_rope_index(
             # Fallback to a dense mask if packed metadata is missing.
             attention_mask = torch.ones_like(input_ids)
 
+    # Position ids are built on CPU with torch.arange(...) below, and the running
+    # counters (`st`, `st_idx`) accumulate audio/vision lengths into that CPU chain.
+    # `audio_seqlens` reaches us as a CUDA tensor (the caller derives it from
+    # `feature_attention_mask.sum(1)`), so `audio_len` stays on CUDA and poisons the
+    # counters -- raising "Expected all tensors to be on the same device" as soon as a
+    # sequence contains a second audio segment. Single-audio sequences never hit it
+    # because the counter is only reused across segments.
+    #
+    # The video branches already guard this the same way (`second_per_grids[i].cpu()`);
+    # this mirrors it for audio. Only the compute device changes -- lengths are
+    # unchanged, and `position_ids` is still returned on `input_ids.device`.
+    if isinstance(audio_seqlens, torch.Tensor):
+        audio_seqlens = audio_seqlens.cpu()
+
     mrope_position_deltas = []
     if input_ids is not None and (
         image_grid_thw is not None or video_grid_thw is not None or audio_seqlens is not None
