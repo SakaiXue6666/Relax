@@ -119,6 +119,7 @@ def get_rope_index(
             # Fallback to a dense mask if packed metadata is missing.
             attention_mask = torch.ones_like(input_ids)
 
+    # ===== [YULIN-MOD] START: keep audio_seqlens on CPU so multi-audio sequences work =====
     # Position ids are built on CPU with torch.arange(...) below, and the running
     # counters (`st`, `st_idx`) accumulate audio/vision lengths into that CPU chain.
     # `audio_seqlens` reaches us as a CUDA tensor (the caller derives it from
@@ -132,6 +133,7 @@ def get_rope_index(
     # unchanged, and `position_ids` is still returned on `input_ids.device`.
     if isinstance(audio_seqlens, torch.Tensor):
         audio_seqlens = audio_seqlens.cpu()
+    # ===== [YULIN-MOD] END =====
 
     mrope_position_deltas = []
     if input_ids is not None and (
